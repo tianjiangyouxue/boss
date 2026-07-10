@@ -301,7 +301,8 @@ function setupEventListeners(container) {
   const restoreBtn = container.querySelector('#restoreBtn');
   const clearButton = Array.from(container.querySelectorAll('.action-button')).find(b => b.textContent.includes('清空'));
   const filterCheckbox = container.querySelector('.qualified-filter');
-  
+  const dateFilterSelect = container.querySelector('.date-filter');
+
   // 防止重复添加事件监听器
   if (aiButton && !aiButton.hasClickListener) {
     console.log('添加AI按钮事件监听');
@@ -488,6 +489,16 @@ function setupEventListeners(container) {
     });
   }
 
+  // 日期筛选器事件
+  if (dateFilterSelect && !dateFilterSelect.hasClickListener) {
+    console.log('添加日期筛选事件监听');
+    dateFilterSelect.hasClickListener = true;
+    dateFilterSelect.addEventListener('change', () => {
+      console.log('日期筛选改变:', dateFilterSelect.value);
+      updateResultsDisplay();
+    });
+  }
+
   console.log('事件监听设置完成');
 }
 
@@ -511,15 +522,34 @@ async function updateResultsDisplay() {
   // 获取过滤器状态
   const filterCheckbox = container.querySelector('.qualified-filter');
   const showOnlyQualified = filterCheckbox?.checked || false;
-  console.log('过滤器状态:', showOnlyQualified ? '仅显示达标' : '显示全部');
+  const dateSelect = container.querySelector('.date-filter');
+  const dateFilter = dateSelect ? dateSelect.value : 'today';
+  console.log('过滤器状态:', showOnlyQualified ? '仅显示达标' : '显示全部', '日期:', dateFilter);
   
+  // 日期过滤函数
+  function inDateRange(ts) {
+    if (dateFilter === 'all') return true;
+    var d = new Date(ts);
+    var now = new Date();
+    var todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (dateFilter === 'today') return d >= todayStart;
+    if (dateFilter === 'yesterday') {
+      var yest = new Date(todayStart); yest.setDate(yest.getDate() - 1);
+      return d >= yest && d < todayStart;
+    }
+    if (dateFilter === '7days') { var d7 = new Date(todayStart); d7.setDate(d7.getDate() - 7); return d >= d7; }
+    if (dateFilter === '30days') { var d30 = new Date(todayStart); d30.setDate(d30.getDate() - 30); return d >= d30; }
+    return true;
+  }
+
   // 更新结果数量
   const resultsCount = container.querySelector('.results-count');
   if (resultsCount) {
-    const qualifiedCount = currentResults.filter(r => (r.evaluation?.score || 0) >= scoreThreshold).length;
-    resultsCount.textContent = showOnlyQualified 
-      ? `已显示 ${qualifiedCount} / ${currentResults.length} 份达标简历` 
-      : `已分析 ${currentResults.length} 份简历`;
+    var dateFilteredCount = currentResults.filter(function(r) { return inDateRange(r.timestamp); }).length;
+    var qualifiedCount = currentResults.filter(function(r) { return (r.evaluation?.score || 0) >= scoreThreshold && inDateRange(r.timestamp); }).length;
+    resultsCount.textContent = showOnlyQualified
+      ? `已显示 ${qualifiedCount} / ${dateFilteredCount} 份达标简历`
+      : `已分析 ${dateFilteredCount} 份简历`;
   }
   
   // 获取或创建结果列表容器
@@ -542,7 +572,9 @@ async function updateResultsDisplay() {
   currentResults.slice().reverse().forEach(result => {
     const score = result.evaluation?.score || 0;
     const isQualified = score >= scoreThreshold;
-    
+
+    // 日期过滤
+    if (!inDateRange(result.timestamp)) return;
     // 如果启用了过滤器且简历不达标，则跳过
     if (showOnlyQualified && !isQualified) {
       return;
@@ -807,11 +839,39 @@ async function forceRefreshDisplay() {
 }
 
 // 修改下载结果函数
+// 取当前面板筛选条件下的结果（日期+达标），挂 window 供 templates.js 复用
+function getFilteredResults(scoreThreshold) {
+window.getFilteredResults = getFilteredResults;
+  if (scoreThreshold === undefined) scoreThreshold = 80;
+  var results = window.resumeManager.analysisResults || [];
+  if (!results.length) return [];
+  var container = document.getElementById(CONTAINER_ID);
+  var showQualified = container?.querySelector('.qualified-filter')?.checked || false;
+  var dateVal = container?.querySelector('.date-filter')?.value || 'today';
+
+  function inDate(ts) {
+    if (dateVal === 'all') return true;
+    var d = new Date(ts), now = new Date();
+    var ts0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (dateVal === 'today') return d >= ts0;
+    if (dateVal === 'yesterday') { var y = new Date(ts0); y.setDate(y.getDate()-1); return d >= y && d < ts0; }
+    if (dateVal === '7days') { var d7 = new Date(ts0); d7.setDate(d7.getDate()-7); return d >= d7; }
+    if (dateVal === '30days') { var d30 = new Date(ts0); d30.setDate(d30.getDate()-30); return d >= d30; }
+    return true;
+  }
+
+  return results.filter(function(r) {
+    if (!inDate(r.timestamp)) return false;
+    if (showQualified && (r.evaluation?.score || 0) < scoreThreshold) return false;
+    return true;
+  });
+}
+
 function downloadResults() {
   console.log('开始下载结果');
   chrome.storage.sync.get(['scoreThreshold'], ({ scoreThreshold = 80 }) => {
-    // 对分析结果进行排序（按分数从高到低）
-    const sortedResults = [...window.resumeManager.analysisResults].sort((a, b) => {
+    var filtered = getFilteredResults(scoreThreshold);
+    const sortedResults = filtered.sort((a, b) => {
       const scoreA = a.evaluation?.score || 0;
       const scoreB = b.evaluation?.score || 0;
       return scoreB - scoreA;
@@ -902,33 +962,26 @@ function downloadSingleResume(result) {
   console.log('已下载Word: ' + name);
 }
 
-// 批量下载所有达标简历
+// 批量下载简历（遵循面板筛选条件）
 async function downloadAllResumes() {
   const { scoreThreshold = 80 } = await new Promise(resolve => {
     chrome.storage.sync.get(['scoreThreshold'], resolve);
   });
 
-  const results = window.resumeManager.analysisResults || [];
-  if (results.length === 0) {
-    alert('没有可下载的简历，请先运行分析');
-    return;
-  }
-
-  // 检查"仅显示达标简历"复选框状态，决定下载范围
-  const filterCheckbox = document.querySelector('.qualified-filter');
-  const showOnlyQualified = filterCheckbox?.checked || false;
-  const qualified = results.filter(r => (r.evaluation?.score || 0) >= scoreThreshold);
-
-  // 勾选"仅显示达标"→只下载达标的；未勾选→下载全部
-  const toDownload = showOnlyQualified ? qualified : results;
-  const desc = showOnlyQualified ? `达标` : `全部`;
+  const toDownload = getFilteredResults(scoreThreshold);
+  const allCount = (window.resumeManager.analysisResults || []).length;
+  var container = document.getElementById(CONTAINER_ID);
+  var showQualified = container?.querySelector('.qualified-filter')?.checked || false;
+  var dateVal = container?.querySelector('.date-filter')?.value || 'today';
+  var dateLabel = dateVal === 'today' ? '今天' : dateVal === 'yesterday' ? '昨天' : dateVal === '7days' ? '近7天' : dateVal === '30days' ? '近30天' : '全部';
+  var desc = (showQualified ? '达标' : '') + dateLabel;
 
   if (toDownload.length === 0) {
-    alert(`没有${desc}简历可下载`);
+    alert(`当前筛选条件下没有简历可下载`);
     return;
   }
 
-  if (confirm(`即将逐份下载 ${toDownload.length} 份${desc}简历（共 ${results.length} 份）。\\n\\n点击"确定"逐份下载，"取消"仅下载合并文件`)) {
+  if (confirm(`即将逐份下载 ${toDownload.length} 份${desc}简历（共 ${allCount} 份）。\\n\\n点击"确定"逐份下载，"取消"仅下载合并文件`)) {
     // 逐份下载
     toDownload.forEach((r, i) => {
       setTimeout(() => downloadSingleResume(r), i * 300);

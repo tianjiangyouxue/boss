@@ -4,6 +4,29 @@ const DEBUG = true; // 打包时 build.js 替换为 false
 let analyzedResumeIds = new Set();
 window.tabId = null;
 
+// ★ 全局 protectSendMessage：扩展热更新后页面未刷新 → sendMessage 抛错 → 提示 F5
+var _extDead = false;
+function protectSendMessage(msg, callback) {
+  if (_extDead) return;
+  try {
+    chrome.runtime.sendMessage(msg, function(response) {
+      var err = chrome.runtime.lastError;
+      if (err && err.message && err.message.includes('Extension context invalidated')) {
+        _extDead = true;
+        showPanelMsg('扩展已更新，请F5刷新页面');
+        if (callback) callback({ ok: false, error: 'Extension context invalidated' });
+        return;
+      }
+      if (callback) callback(response);
+    });
+  } catch(e) {
+    if (e.message && e.message.includes('Extension context invalidated')) {
+      _extDead = true;
+      showPanelMsg('扩展已更新，请F5刷新页面');
+    }
+  }
+}
+
 // ====== 每日用量限制 ======
 const DAILY_BROWSE_LIMIT = 100;
 const DAILY_SHARE_LIMIT = 50;
@@ -445,7 +468,7 @@ async function captureShareCardImage(doc) {
       otherOpt.click();
       await new Promise(r => setTimeout(r, 1000));
       const ss = await new Promise((res, rej) => {
-        chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, r => {
+        protectSendMessage({ action: 'captureVisibleTab' }, r => {
           if (r && r.success) res(r.imageData); else rej(new Error('截图失败'));
         });
       });
@@ -587,7 +610,7 @@ async function generateShareLink(doc = document) {
       // Canvas 简历无转发按钮 → 直接截整页作为卡片图
       console.log('[分享] 无转发按钮，截取整页作为卡片');
       const ss = await new Promise((res, rej) => {
-        chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, r => {
+        protectSendMessage({ action: 'captureVisibleTab' }, r => {
           if (r && r.success) res(r.imageData); else rej(new Error('截图失败'));
         });
       });
@@ -632,7 +655,7 @@ async function generateShareLink(doc = document) {
       // 兜底截图（DPR 修正）
       if (!cardImage) {
         try {
-          const ss = await new Promise((res, rej) => { chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, r => { if (r && r.success) res(r.imageData); else rej(new Error('截图失败')); }); });
+          const ss = await new Promise((res, rej) => { protectSendMessage({ action: 'captureVisibleTab' }, r => { if (r && r.success) res(r.imageData); else rej(new Error('截图失败')); }); });
           const dpr = window.devicePixelRatio || 1;
           const popup = (activeShareBox||document).querySelector('.right-content') || activeShareBox || document.querySelector('.boss-popup__content');
           if (popup) {
@@ -761,7 +784,7 @@ function getModel() {
 // DeepSeek 调用统一走后端代理 (192.168.110.22:8866/deepseek/proxy)，API key 只存在于服务端
 async function deepseekRequest(body) {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ action: 'deepseekProxy', body }, response => {
+    protectSendMessage({ action: 'deepseekProxy', body }, response => {
       if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
       else if (response && response.ok) resolve(response.data);
       else reject(new Error(response?.error || '后端服务不可用'));
@@ -3266,10 +3289,16 @@ async function handleSearchPageAnalysis(button) {
       await new Promise(resolve => setTimeout(resolve, 3000));
 
       const newCardsAfterScroll = iframeDoc.querySelectorAll('#is-gray-batch-chat .card-list > li.geek-info-card:not(.has-read)');
-      // 新卡片加载后回到列表顶部
+      // 新卡片插入顶部后，滚回列表最上方（Boss 最新简历在上面）
       if (newCardsAfterScroll.length > resumeCards.length) {
-        var listContainer = iframeDoc.querySelector('.card-list') || iframeDoc.querySelector('.geek-list-wrap');
-        if (listContainer) { listContainer.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+        console.log('新卡片加载，回顶部');
+        // 复位 iframe 文档滚动到顶部
+        var de = iframeDoc.documentElement;
+        de.scrollTop = 0;
+        iframeDoc.body && (iframeDoc.body.scrollTop = 0);
+        try { searchFrame.contentWindow && searchFrame.contentWindow.scrollTo(0, 0); } catch(e) {}
+        // 延时再设一次（autoscroll 的 smooth 动画可能复写）
+        setTimeout(function() { de.scrollTop = 0; iframeDoc.body && (iframeDoc.body.scrollTop = 0); }, 600);
       }
       if (newCardsAfterScroll.length === resumeCards.length && !newResumeActuallyProcessedInThisPass) {
         // 检查 previousCardCount 而不是 resumeCards.length，因为 resumeCards.length 是滚动前的数量
@@ -4456,8 +4485,14 @@ async function handleRecommendPageAnalysis(button) {
       const newCardsCount = newCards.length - resumeCards.length;
       // 新卡片加载后回到列表顶部
       if (newCardsCount > 0) {
-        var listContainer2 = iframeDoc.querySelector('.card-list') || iframeDoc.querySelector('.recommend-card-list');
-        if (listContainer2) { listContainer2.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+        console.log('新卡片加载，回顶部');
+        // 复位 iframe 文档滚动到顶部
+        var de = iframeDoc.documentElement;
+        de.scrollTop = 0;
+        iframeDoc.body && (iframeDoc.body.scrollTop = 0);
+        try { searchFrame.contentWindow && searchFrame.contentWindow.scrollTo(0, 0); } catch(e) {}
+        // 延时再设一次（autoscroll 的 smooth 动画可能复写）
+        setTimeout(function() { de.scrollTop = 0; iframeDoc.body && (iframeDoc.body.scrollTop = 0); }, 600);
       }
       console.log(`检测到${newCardsCount}个新加载的简历卡片`);
 
@@ -6531,7 +6566,7 @@ async function smartSplitOcr(b64, maxH) {
 // 单次 PaddleOCR 调用
 function ocrOne(b64) {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ action: 'paddleLocal', b64: b64 }, response => {
+    protectSendMessage({ action: 'paddleLocal', b64: b64 }, response => {
       if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
       else if (response && response.ok) resolve(response.text);
       else reject(new Error(response?.error || 'PaddleOCR失败'));

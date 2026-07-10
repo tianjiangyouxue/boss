@@ -37,8 +37,15 @@ const templates = {
       <div class="filter-container">
         <label class="filter-label" style="padding-left: 20px;">
           <input type="checkbox" class="qualified-filter" style="margin-right: 20px;" />
-          仅显示达标简历
+          仅达标简历
         </label>
+        <select class="date-filter" style="margin-left: 12px; padding: 2px 6px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 12px;">
+          <option value="today">今天</option>
+          <option value="yesterday">昨天</option>
+          <option value="7days">近7天</option>
+          <option value="30days">近30天</option>
+          <option value="all">全部</option>
+        </select>
       </div>
       <div class="results-container">
         <div class="results-list"></div>
@@ -572,8 +579,9 @@ const templates = {
   exportToExcel: function() {
     console.log('开始导出Excel');
     chrome.storage.sync.get(['scoreThreshold'], ({ scoreThreshold = 80 }) => {
-      // 对分析结果进行排序（按分数从高到低）
-      const sortedResults = [...window.resumeManager.analysisResults].sort((a, b) => {
+      // 用当前筛选条件过滤
+      var filterFn = window.getFilteredResults || function() { return window.resumeManager.analysisResults || []; };
+      const sortedResults = filterFn(scoreThreshold).sort((a, b) => {
         const scoreA = a.evaluation?.score || 0;
         const scoreB = b.evaluation?.score || 0;
         return scoreB - scoreA;
