@@ -6223,9 +6223,13 @@ async function captureFullResumeScreenshot(doc) {
   if (iframe.style.height) { const m = iframe.style.height.match(/([\d.]+)px/); if (m) resumeHeight = parseFloat(m[1]); }
   if (!resumeHeight) resumeHeight = iframe.offsetHeight || iframeRect().height;
 
-  const cropX = Math.max(0, Math.floor(iframeRect().left));
-  const cropW = Math.min(Math.ceil(iframeRect().width), winW - cropX);
-  console.log(`[Vision] 简历高:${resumeHeight} dpr:${dpr} winH:${winH} cropX:${cropX} cropW:${cropW}`);
+  // 初始裁剪区（仅用于日志和近似值，实际截图在 shotFixed() 里动态重算）
+  const _r0 = iframeRect();
+  const _cropX = Math.max(0, Math.floor(_r0.left));
+  const _cropW = Math.min(Math.ceil(_r0.width), winW - _cropX);
+  const _cropTop = Math.max(0, Math.floor(_r0.top));
+  const _visibleH = Math.max(0, Math.min(winH, Math.floor(_r0.bottom)) - _cropTop);
+  console.log(`[Vision] 简历高:${resumeHeight} dpr:${dpr} winH:${winH} cropX:${_cropX} cropW:${_cropW}`);
 
   // 选滚动源：已知 .resume-center-side 是 overflow:auto 滚动容器（CSS 确认），用激活弹窗内的那个
   function pickScroller() {
@@ -6246,20 +6250,28 @@ async function captureFullResumeScreenshot(doc) {
     return best;
   }
 
-  // 固定裁剪区 = iframe 当前在视口中的可见矩形（虚拟滚动时 iframe 本身不动）
-  const r0 = iframeRect();
-  const cropTop = Math.max(0, Math.floor(r0.top));
-  const visibleH = Math.max(0, Math.min(winH, Math.floor(r0.bottom)) - cropTop);
-
   // 指纹：取裁剪图中段一小段，判断内容是否变化（识别到底/没滚动）
   function fingerprint(u) { const h = u.length >> 1; return u.slice(h, h + 160); }
 
+  // ★ 每次截图前重新计算裁剪区（堆叠弹窗+滚动时 iframe 位置会变）
   async function shotFixed() {
-    const fp = await captureVisibleTab();
+    // 重新确认当前激活弹窗的 iframe（可能因 Boss 关闭/重建弹窗而变化）
+    var curActive = pickActive('.dialog-lib-resume') || pickActive('.lib-standard-resume') || activeDialog;
+    var curIframe = null;
+    if (curActive) curIframe = curActive.querySelector('.resume-detail-wrap iframe') || curActive.querySelector('iframe');
+    if (!curIframe) curIframe = iframe; // 兜底用初始值
+    var r = curIframe.getBoundingClientRect();
+    if (r.width < 50 || r.height < 50) return null; // iframe 不可见
+    var ct = Math.max(0, Math.floor(r.top));
+    var ch = Math.max(0, Math.min(winH, Math.floor(r.bottom)) - ct);
+    if (ch < 30) return null;
+    var cw = Math.min(Math.ceil(r.width), winW - Math.max(0, Math.floor(r.left)));
+    var cx = Math.max(0, Math.floor(r.left));
+    var fp = await captureVisibleTab();
     if (!fp) return null;
     return await cropImage(fp,
-      Math.round(cropX * dpr), Math.round(cropTop * dpr),
-      Math.round(cropW * dpr), Math.round(visibleH * dpr));
+      Math.round(cx * dpr), Math.round(ct * dpr),
+      Math.round(cw * dpr), Math.round(ch * dpr));
   }
 
   const originalScrollTop = sc.scrollTop;
@@ -6267,22 +6279,22 @@ async function captureFullResumeScreenshot(doc) {
     const scroller = pickScroller();
     const maxScroll = scroller ? (scroller.scrollHeight - scroller.clientHeight) : 0;
     const scrollerName = scroller ? (scroller.className || scroller.tagName) : '无';
-    console.log('[Vision] 滚动容器:', scrollerName, 'maxScroll:', Math.round(maxScroll), 'cropTop:', cropTop, 'visibleH:', Math.round(visibleH));
+    console.log('[Vision] 滚动容器:', scrollerName, 'maxScroll:', Math.round(maxScroll));
     DEBUG && showPanelMsg('截屏:'+scrollerName+' 范围'+Math.round(maxScroll)+'px');
 
     const slices = [];   // {contentY0(=scrollTop), sliceH, dataUrl}
 
-    if (!scroller || maxScroll < 20 || visibleH < 30) {
+    if (!scroller || maxScroll < 20 || _visibleH < 30) {
       // 无需/无法滚动：单张
       const u = await shotFixed();
-      if (u) slices.push({ contentY0: 0, sliceH: visibleH, dataUrl: u });
+      if (u) slices.push({ contentY0: 0, sliceH: _visibleH, dataUrl: u });
     } else {
       scroller.scrollTop = 0;
       scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
       // WheelEvent 确保触发 canvas 重绘（真实滚动内容但不被检测——原生事件）
       scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, bubbles: true, cancelable: true }));
       await sleep(450);
-      const step = Math.max(80, visibleH - 50);   // 50px 重叠防割裂
+      const step = Math.max(80, _visibleH - 50);   // 50px 重叠防割裂
       let lastFinger = '', pos = 0, guard = 0;
       while (guard++ < 30) {
         scroller.scrollTop = pos;
@@ -6294,7 +6306,7 @@ async function captureFullResumeScreenshot(doc) {
         if (u) {
           const fg = fingerprint(u);
           if (fg !== lastFinger) {
-            slices.push({ contentY0: realPos, sliceH: visibleH, dataUrl: u });
+            slices.push({ contentY0: realPos, sliceH: _visibleH, dataUrl: u });
             lastFinger = fg;
             DEBUG && showPanelMsg('截屏'+slices.length+'/'+Math.ceil(maxScroll/step+1)+' scrollTop='+Math.round(realPos));
             console.log(`[Vision] 切片${slices.length} scrollTop=${Math.round(realPos)}`);
@@ -6316,7 +6328,7 @@ async function captureFullResumeScreenshot(doc) {
       return [{ ocrPng: singleUrl, displayImage: singleDisp || singleUrl }];
     }
 
-    const merged = await stitchSlices(slices, cropW, resumeHeight, dpr);
+    const merged = await stitchSlices(slices, _cropW, resumeHeight, dpr);
     console.log('[Vision] 拼接' + slices.length + '张为1张长图');
     DEBUG && showPanelMsg('拼接完成 ' + slices.length + '屏→1张长图');
     return merged ? [merged] : slices.map(s => ({ ocrPng: s.dataUrl, displayImage: s.dataUrl }));
