@@ -492,22 +492,24 @@ async function captureCardOnly(doc) {
       return {shareLink:null,shareCardImage:null};
     }
 
-    // 1. 找转发按钮
-    var btn = (doc||document).querySelectorAll ? Array.from((doc||document).querySelectorAll('span,i,em,div,button')).find(function(el){
+    // 1. 找转发按钮 ★ 从当前激活弹窗内搜，避免堆叠弹窗命中旧弹窗
+    // 复用已有的 pickActive 风格
+    var _stk = function(el) { var z=0,p=el; while(p&&p!==document.body){ var zi=parseInt(getComputedStyle(p).zIndex,10); if(!isNaN(zi))z=Math.max(z,zi); p=p.parentElement; } return z; };
+    var _pAct = function(sel,root) { var els=Array.from((root||document).querySelectorAll(sel)).filter(function(e){var r=e.getBoundingClientRect();return r.width>50&&r.height>50}); if(!els.length)return null; els.sort(function(a,b){return _stk(a)-_stk(b)}); return els[els.length-1]; };
+    var activeDlg = _pAct('.dialog-lib-resume') || _pAct('.lib-standard-resume') || document;
+    var btn = Array.from(activeDlg.querySelectorAll('span,i,em,div,button')).find(function(el){
       var t=(el.textContent||'').trim();return(t==='转发'||t==='分享')&&el.offsetParent&&!el.querySelector('*');
-    }) : null;
-    if(!btn){try{var ifs=document.querySelectorAll('iframe');for(var i=0;i<ifs.length;i++){try{var fd=ifs[i].contentDocument;if(fd){btn=Array.from(fd.querySelectorAll('span')).find(function(el){return el.textContent&&el.textContent.trim()==='转发'&&el.offsetParent});if(btn)break}}catch(e){}}}catch(e){}}
+    });
+    // 兜底：iframe 内搜索（从激活弹窗的 iframe 搜）
+    if(!btn){try{var ifs=document.querySelectorAll('iframe');for(var i=0;i<ifs.length;i++){try{var fd=ifs[i].contentDocument;if(fd){btn=Array.from(fd.querySelectorAll('span,i,em,div,button')).find(function(el){var t=(el.textContent||'').trim();return(t==='转发'||t==='分享')&&el.offsetParent&&!el.querySelector('*')});if(btn)break}}catch(e){}}}catch(e){}}
     if(!btn) return {shareLink:null,shareCardImage:null};
 
     // 2. 点转发→弹窗
     btn.click();
     await new Promise(function(r){setTimeout(r,800)});
 
-    // 3. 找"转发至其他"并点击（显示分享卡片）
-    // ★ 堆叠弹窗：用 pickActive 选当前激活的 c-share-box
-    function _stackZ(el) { var z=0,p=el; while(p&&p!==document.body){ var zi=parseInt(getComputedStyle(p).zIndex,10); if(!isNaN(zi))z=Math.max(z,zi); p=p.parentElement; } return z; }
-    function _pickActive(sel) { var els=Array.from(document.querySelectorAll(sel)).filter(function(e){var r=e.getBoundingClientRect();return r.width>50&&r.height>50}); if(!els.length)return null; els.sort(function(a,b){return _stackZ(a)-_stackZ(b)}); return els[els.length-1]; }
-    var shareBox=_pickActive('.c-share-box');
+    // 3. 找"转发至其他"并点击（显示分享卡片）— 复用前文的 _pAct
+    var shareBox=_pAct('.c-share-box');
     var opts=shareBox?shareBox.querySelectorAll('.item-content, .nav-list .item'):document.querySelectorAll('.c-share-box .item-content, .c-share-box .nav-list .item');
     if(!opts||!opts.length){var ll=(shareBox||document).querySelector('.left-list');opts=ll?ll.querySelectorAll('.item'):[]}
     var other=Array.from(opts).find(function(el){return el.textContent.includes('转发至其他')});
@@ -554,16 +556,18 @@ async function generateShareLink(doc = document) {
 
     console.log('开始生成分享链接...');
 
-    // 1. 点击转发按钮
+    // 1. 点击转发按钮 ★ 从当前激活弹窗内搜
+    var _stk2 = function(el) { var z=0,p=el; while(p&&p!==document.body){ var zi=parseInt(getComputedStyle(p).zIndex,10); if(!isNaN(zi))z=Math.max(z,zi); p=p.parentElement; } return z; };
+    var _pAct2 = function(sel,root) { var els=Array.from((root||document).querySelectorAll(sel)).filter(function(e){var r=e.getBoundingClientRect();return r.width>50&&r.height>50}); if(!els.length)return null; els.sort(function(a,b){return _stk2(a)-_stk2(b)}); return els[els.length-1]; };
+    var activeDialog2 = _pAct2('.dialog-lib-resume') || _pAct2('.lib-standard-resume') || doc;
     let shareButton = null;
-    // 按文字匹配（最可靠）
-    const allEls = Array.from(doc.querySelectorAll('span, i, em, div, button'));
+    const allEls = Array.from(activeDialog2.querySelectorAll('span, i, em, div, button'));
     shareButton = allEls.find(el => {
       const t = (el.textContent || '').trim();
       return (t === '转发' || t === '分享') && el.offsetParent && !el.querySelector('*');
     });
-    // 旧版 class 兜底
-    if (!shareButton) shareButton = doc.querySelector('.resume-layout-wrap .share i, div.icon-coop-forward, em.iboss-zhuanfa, div.share > i');
+    // 旧版 class 兜底（从激活弹窗）
+    if (!shareButton) shareButton = activeDialog2.querySelector('.resume-layout-wrap .share i, div.icon-coop-forward, em.iboss-zhuanfa, div.share > i');
     // iframe 内查找
     if (!shareButton) {
       const iframes = doc.querySelectorAll('iframe');
@@ -596,23 +600,16 @@ async function generateShareLink(doc = document) {
     console.log('等待分享弹窗出现...');
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // 查找钉钉转发选项
+    // 查找转发选项 ★ 从当前激活的 c-share-box 内查找
+    var activeShareBox = _pAct2('.c-share-box');
     let allOptions;
-    const firstOptions = document.querySelectorAll('.c-share-box .item-content');
-    if (firstOptions && firstOptions.length > 0) {
+    if (activeShareBox) {
+      allOptions = activeShareBox.querySelectorAll('.item-content, .nav-list .item');
+    }
+    if (!allOptions || !allOptions.length) {
+      // 兜底：全文档搜（旧行为）
+      const firstOptions = document.querySelectorAll('.c-share-box .item-content');
       allOptions = firstOptions;
-    } else {
-      try {
-        const leftList = document.querySelector("div.boss-popup__content > div > div > div.left-list");
-        if (leftList) {
-          allOptions = leftList.querySelectorAll(".item");
-        } else {
-          allOptions = []; // 提供一个空数组作为后备
-        }
-      } catch (e) {
-        console.warn('查找分享选项出错:', e);
-        allOptions = []; // 错误处理
-      }
     }
     console.log('所有分享选项:', Array.from(allOptions).map(el => el.textContent.trim()));
 
@@ -622,9 +619,9 @@ async function generateShareLink(doc = document) {
     if (shareToOtherOption) {
       shareToOtherOption.click();
       await new Promise(r => setTimeout(r, 700));
-      // 轮询等卡片图片生成（直接读 src，像素级精确）
+      // 轮询等卡片图片生成（从当前激活 shareBox 读，避免堆叠弹窗错人）
       for (let t = 0; t < 12; t++) {
-        const imgEl = document.querySelector('.c-share-box img.share-image, .share-image');
+        const imgEl = (activeShareBox || document).querySelector('img.share-image, .share-image');
         if (imgEl && imgEl.src && imgEl.src.indexOf('data:image') === 0 && imgEl.src.length > 1000) {
           cardImage = imgEl.src;
           console.log('[分享卡片] 直接读取 img.src, 大小:', (cardImage.length / 1024).toFixed(0) + 'KB');
@@ -637,7 +634,7 @@ async function generateShareLink(doc = document) {
         try {
           const ss = await new Promise((res, rej) => { chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, r => { if (r && r.success) res(r.imageData); else rej(new Error('截图失败')); }); });
           const dpr = window.devicePixelRatio || 1;
-          const popup = document.querySelector('.c-share-box .right-content') || document.querySelector('.c-share-box') || document.querySelector('.boss-popup__content');
+          const popup = (activeShareBox||document).querySelector('.right-content') || activeShareBox || document.querySelector('.boss-popup__content');
           if (popup) {
             const r2 = popup.getBoundingClientRect();
             if (r2.width > 150 && r2.height > 150) {
@@ -654,30 +651,31 @@ async function generateShareLink(doc = document) {
 
     // 截图后：卡片图已取，不关弹窗，直接从左侧菜单切换"邮件转发"
     // 左侧 `.left-list .item` 还在，不用重新打开转发面板
-    allOptions = document.querySelectorAll('.c-share-box .item-content');
+    allOptions = (activeShareBox||document).querySelectorAll('.item-content, .nav-list .item');
     if (!allOptions || allOptions.length === 0) {
-      const ll = document.querySelector("div.boss-popup__content > div > div > div.left-list");
-      allOptions = ll ? ll.querySelectorAll(".item") : [];
+      const ll = (activeShareBox||document).querySelector('.left-list');
+      allOptions = ll ? ll.querySelectorAll('.item') : [];
     }
     let dingTalkOption = Array.from(allOptions).find(el => el.textContent.includes('邮件转发'));
     if (!dingTalkOption) {
       console.warn('[分享] 左侧菜单不可见，关闭卡片重试...');
-      var cx = document.querySelector('.boss-popup__close i, [class*="close"] i');
+      var cx = (activeShareBox||document).querySelector('.boss-popup__close i, [class*="close"] i');
       if (cx) { cx.click(); await new Promise(r => setTimeout(r, 300)); }
       shareButton.click();
       await new Promise(r => setTimeout(r, 800));
-      allOptions = document.querySelectorAll('.c-share-box .item-content');
-      if (!allOptions || allOptions.length === 0) {
-        const ll = document.querySelector("div.boss-popup__content > div > div > div.left-list");
-        allOptions = ll ? ll.querySelectorAll(".item") : [];
+      activeShareBox = _pAct2('.c-share-box'); // 重新找激活弹窗
+      allOptions = (activeShareBox||document).querySelectorAll('.item-content, .nav-list .item');
+      if (!allOptions || !allOptions.length) {
+        const ll = (activeShareBox||document).querySelector('.left-list');
+        allOptions = ll ? ll.querySelectorAll('.item') : [];
       }
       dingTalkOption = Array.from(allOptions).find(el => el.textContent.includes('邮件转发'));
     }
     if (!dingTalkOption) throw new Error('未找到邮件转发选项');
     dingTalkOption.click();
     await new Promise(resolve => setTimeout(resolve, 500));
-    const emailInput = document.querySelector('input[placeholder*="邮箱"], input[placeholder*="邮件"], .boss-popup__content input[type="text"], .boss-dialog__wrapper input[type="text"]')
-      || Array.from(document.querySelectorAll('input[type="text"]')).find(i => i.offsetParent && i.closest('[class*="popup"],[class*="dialog"],[class*="modal"]'));
+    const emailInput = (activeShareBox||document).querySelector('input[placeholder*="邮箱"], input[placeholder*="邮件"], input[type="text"]')
+      || Array.from((activeShareBox||document).querySelectorAll('input[type="text"]')).find(i => i.offsetParent && i.closest('[class*="popup"],[class*="dialog"],[class*="modal"]'));
     if (!emailInput) throw new Error('未找到邮箱输入框');
     const { forwardEmail } = await new Promise(r => chrome.storage.sync.get(['forwardEmail'], r));
     emailInput.value = forwardEmail || 'hr@example.com';
