@@ -94,7 +94,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'deepseekProxy') {
-    // 代理 DeepSeek 调用 — API key 只存在于后端 (192.168.110.22:8866)
+    // 代理 DeepSeek 调用 — API key 只存在于后端
     fetch('http://192.168.110.22:8866/deepseek/proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

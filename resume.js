@@ -782,7 +782,7 @@ function getModel() {
   return Promise.resolve('deepseek-chat');
 }
 
-// DeepSeek 调用统一走后端代理 (192.168.110.22:8866/deepseek/proxy)，API key 只存在于服务端
+// DeepSeek 调用统一走后端代理，API key 只存在于服务端（后端地址由构建时 $$BACKEND_URL$$ 决定）
 async function deepseekRequest(body) {
   return new Promise((resolve, reject) => {
     protectSendMessage({ action: 'deepseekProxy', body }, response => {

@@ -1103,44 +1103,28 @@ async function getApiKey() {
 
 // 获取剩余积分（自定义模式下跳过官方积分检查）
 async function getCredit() {
+  // 免费版不检查积分
+  if (!('$$CREDITS_REQUIRED$$' === 'true')) {
+    return 999999;
+  }
+  // 收费版：调公网 /api/info 查剩余积分
   try {
-    // 检查 API 模式：自定义模式下不需要官方积分
-    const { apiMode } = await chrome.storage.local.get(['apiMode']);
-    if (apiMode === 'custom') {
-      console.log('[Debug] 自定义 API 模式，跳过积分检查');
-      return 999999; // 返回一个大数，绕过积分不足的检查
-    }
-
     const environment = await getCurrentEnvironment();
     const apiKey = await getApiKey();
-
-    console.log('[Debug] apiKey 长度:', apiKey?.length || 0);
-
-    if (!apiKey) {
-      throw new Error('未设置API密钥');
-    }
-
+    console.log('[Credit] 环境:', environment, 'apiKey长度:', apiKey?.length || 0);
+    if (!apiKey) { throw new Error('未设置API密钥'); }
     const baseUrl = window.API_CONFIG[environment].baseUrl;
     const response = await fetch(`${baseUrl}/api/info`, {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`
-      }
+      headers: { 'Authorization': `Bearer ${apiKey}` }
     });
-
     if (!response.ok) {
-      if (response.status === 403) {
-        throw new Error('API密钥无效或已过期');
-      }
-      throw new Error(`获取积分信息失败 (状态码: ${response.status})`);
+      if (response.status === 403) throw new Error('API密钥无效或已过期');
+      throw new Error(`获取积分信息失败 (${response.status})`);
     }
-
     const data = await response.json();
-    console.log('[Debug] /api/info 返回数据:', data);
     if (!data || typeof data.remainingCredits === 'undefined') {
-      console.warn('[Debug] 返回数据格式:', data);
-      throw new Error('获取积分信息失败，返回数据格式不正确');
+      throw new Error('积分数据格式不正确');
     }
-
     return data.remainingCredits;
   } catch (error) {
     console.error('获取积分出错:', error);
@@ -1181,6 +1165,8 @@ async function startAIAnalysis() {
 
   // 异步检查API密钥
   async function checkApiKey() {
+    // 免费版跳过密钥校验
+    if (!('$$CREDITS_REQUIRED$$' === 'true')) return true;
     try {
       // 检查自定义 API 配置
       let customApiConfig;
@@ -1244,13 +1230,16 @@ async function startAIAnalysis() {
   isAnalyzing = true;
 
   try {
-    const credit = await getCredit();
-    if (credit <= 0) {
-      alert('积分不足，请先充值');
-      stopAnalysis();
-      return;
+    // 收费版：检查积分，不足则阻止
+    if ('$$CREDITS_REQUIRED$$' === 'true') {
+      const credit = await getCredit();
+      if (credit <= 0) {
+        alert('积分不足，请先充值');
+        stopAnalysis();
+        return;
+      }
     }
-    
+
     if (button) {
       button.classList.add('processing');
       button.style.backgroundColor = '#ff4d4f';

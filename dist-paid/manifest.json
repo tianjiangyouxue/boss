@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "BOSS直聘助手",
+  "version": "0.1.0",
+  "description": "AI批量筛选Boss直聘简历，自动评分+收藏+打招呼+下载，支持推荐/搜索/沟通页面，HR高效招聘神器",
+  "permissions": [
+    "scripting",
+    "activeTab",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.zhipin.com/*",
+    "https://zhipin.com/*",
+    "<all_urls>"
+  ],
+  "icons": {
+    "128": "images/icon.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "images/icon.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zhipin.com/*"
+      ],
+      "js": [
+        "db.js",
+        "resume.js",
+        "templates.js",
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "images/*",
+        "styles.css"
+      ],
+      "matches": [
+        "https://www.zhipin.com/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval'; child-src 'self'"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
