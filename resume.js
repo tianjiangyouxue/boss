@@ -3289,17 +3289,6 @@ async function handleSearchPageAnalysis(button) {
       await new Promise(resolve => setTimeout(resolve, 3000));
 
       const newCardsAfterScroll = iframeDoc.querySelectorAll('#is-gray-batch-chat .card-list > li.geek-info-card:not(.has-read)');
-      // 新卡片插入顶部后，滚回列表最上方（Boss 最新简历在上面）
-      if (newCardsAfterScroll.length > resumeCards.length) {
-        console.log('新卡片加载，回顶部');
-        // 复位 iframe 文档滚动到顶部
-        var de = iframeDoc.documentElement;
-        de.scrollTop = 0;
-        iframeDoc.body && (iframeDoc.body.scrollTop = 0);
-        try { searchFrame.contentWindow && searchFrame.contentWindow.scrollTo(0, 0); } catch(e) {}
-        // 延时再设一次（autoscroll 的 smooth 动画可能复写）
-        setTimeout(function() { de.scrollTop = 0; iframeDoc.body && (iframeDoc.body.scrollTop = 0); }, 600);
-      }
       if (newCardsAfterScroll.length === resumeCards.length && !newResumeActuallyProcessedInThisPass) {
         // 检查 previousCardCount 而不是 resumeCards.length，因为 resumeCards.length 是滚动前的数量
         console.log('滚动后卡片数量未增加，且本轮未处理新简历。可能已到达底部。');
@@ -4483,17 +4472,6 @@ async function handleRecommendPageAnalysis(button) {
 
       // 计算新加载的卡片数量
       const newCardsCount = newCards.length - resumeCards.length;
-      // 新卡片加载后回到列表顶部
-      if (newCardsCount > 0) {
-        console.log('新卡片加载，回顶部');
-        // 复位 iframe 文档滚动到顶部
-        var de = iframeDoc.documentElement;
-        de.scrollTop = 0;
-        iframeDoc.body && (iframeDoc.body.scrollTop = 0);
-        try { searchFrame.contentWindow && searchFrame.contentWindow.scrollTo(0, 0); } catch(e) {}
-        // 延时再设一次（autoscroll 的 smooth 动画可能复写）
-        setTimeout(function() { de.scrollTop = 0; iframeDoc.body && (iframeDoc.body.scrollTop = 0); }, 600);
-      }
       console.log(`检测到${newCardsCount}个新加载的简历卡片`);
 
       // 如果有新卡片，且数量达到或超过15个，直接处理而不继续滚动

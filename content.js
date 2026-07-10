@@ -822,10 +822,10 @@ async function updateResultsDisplay() {
     resultsListContainer.appendChild(resultItem);
   });
 
-  // 自动滚动到底部，确保最新结果可见
+  // 自动滚动到顶部，确保最新结果可见（最新简历倒序排在列表顶部）
   if (resultsListContainer.children.length > 0) {
     setTimeout(() => {
-      resultsListContainer.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      resultsListContainer.scrollTop = 0;
     }, 100);
   }
 
