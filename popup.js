@@ -30,7 +30,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function loadSettings() {
-    const result = await chrome.storage.sync.get(['scoreThreshold', 'forwardEmail', 'autoFavorite', 'autoGreet', 'autoShare', 'captureUnqualifiedCard']);
+    const result = await chrome.storage.sync.get(['scoreThreshold', 'forwardEmail', 'autoFavorite', 'autoGreet', 'autoShare', 'captureUnqualifiedCard', 'filterRead']);
     scoreThresholdInput.value = result.scoreThreshold || 80;
     forwardEmailInput.value = result.forwardEmail || '';
     autoFavoriteCheckbox.checked = result.autoFavorite !== undefined ? result.autoFavorite : true;
@@ -38,7 +38,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     autoShareCheckbox.checked = result.autoShare !== undefined ? result.autoShare : false;
     const captureUnqualifiedCardCheckbox = document.getElementById('captureUnqualifiedCard');
     if (captureUnqualifiedCardCheckbox) captureUnqualifiedCardCheckbox.checked = result.captureUnqualifiedCard !== undefined ? result.captureUnqualifiedCard : true;
-    await chrome.storage.sync.set({ scoreThreshold: result.scoreThreshold || 80, forwardEmail: forwardEmailInput.value, autoFavorite: autoFavoriteCheckbox.checked, autoGreet: autoGreetCheckbox.checked, autoShare: autoShareCheckbox.checked, captureUnqualifiedCard: result.captureUnqualifiedCard !== undefined ? result.captureUnqualifiedCard : true });
+    const filterReadCheckbox = document.getElementById('filterRead');
+    if (filterReadCheckbox) filterReadCheckbox.checked = result.filterRead !== undefined ? result.filterRead : true;
+    await chrome.storage.sync.set({ scoreThreshold: result.scoreThreshold || 80, forwardEmail: forwardEmailInput.value, autoFavorite: autoFavoriteCheckbox.checked, autoGreet: autoGreetCheckbox.checked, autoShare: autoShareCheckbox.checked, captureUnqualifiedCard: result.captureUnqualifiedCard !== undefined ? result.captureUnqualifiedCard : true, filterRead: result.filterRead !== undefined ? result.filterRead : true });
     document.getElementById('forwardEmailRow').style.display = autoShareCheckbox.checked ? 'block' : 'none';
   }
 
@@ -65,7 +67,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   saveButton.addEventListener('click', async () => {
     const captureUnqualifiedCardCheckbox = document.getElementById('captureUnqualifiedCard');
-    var settings = { scoreThreshold: parseInt(scoreThresholdInput.value, 10), forwardEmail: forwardEmailInput.value.trim(), autoFavorite: autoFavoriteCheckbox.checked, autoGreet: autoGreetCheckbox.checked, autoShare: autoShareCheckbox.checked, captureUnqualifiedCard: captureUnqualifiedCardCheckbox ? captureUnqualifiedCardCheckbox.checked : true };
+    const filterReadCheckbox = document.getElementById('filterRead');
+    var settings = { scoreThreshold: parseInt(scoreThresholdInput.value, 10), forwardEmail: forwardEmailInput.value.trim(), autoFavorite: autoFavoriteCheckbox.checked, autoGreet: autoGreetCheckbox.checked, autoShare: autoShareCheckbox.checked, captureUnqualifiedCard: captureUnqualifiedCardCheckbox ? captureUnqualifiedCardCheckbox.checked : true, filterRead: filterReadCheckbox ? filterReadCheckbox.checked : true };
     if (isNaN(settings.scoreThreshold) || settings.scoreThreshold < 0 || settings.scoreThreshold > 100) { showStatus('评分阈值必须在0-100之间', 'error'); return; }
     try { await chrome.storage.sync.set(settings); await saveConfig(); showStatus('设置已保存', 'success'); } catch (error) { showStatus('保存失败：' + error.message, 'error'); }
   });

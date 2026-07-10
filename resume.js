@@ -3040,6 +3040,11 @@ async function handleSearchPageAnalysis(button) {
   await waitForElementInIframe(iframeDoc, '#is-gray-batch-chat .card-list');
   console.log('简历列表已加载');
 
+  // 读取"过滤已读简历"设置，动态构建卡片选择器
+  var filterRead = await new Promise(function(r) { chrome.storage.sync.get(['filterRead'], function(res) { r(res.filterRead !== undefined ? res.filterRead : true); }); });
+  var cardSelector = '#is-gray-batch-chat .card-list > li.geek-info-card' + (filterRead ? ':not(.has-read)' : '');
+  console.log('卡片选择器:', cardSelector, '(过滤已读:', filterRead, ')');
+
   await closeAllResumeDialogs(document);
 
   const processedIds = new Set();
@@ -3059,7 +3064,7 @@ async function handleSearchPageAnalysis(button) {
       break;
     }
 
-    const resumeCards = iframeDoc.querySelectorAll('#is-gray-batch-chat .card-list > li.geek-info-card:not(.has-read)');
+    const resumeCards = iframeDoc.querySelectorAll(cardSelector);
     console.log(`当前视口发现 ${resumeCards.length} 个简历卡片。`);
 
     if (resumeCards.length === 0 && previousCardCount === 0) {
@@ -3288,14 +3293,14 @@ async function handleSearchPageAnalysis(button) {
       await autoScroll(iframeDoc);
       await new Promise(resolve => setTimeout(resolve, 3000));
 
-      const newCardsAfterScroll = iframeDoc.querySelectorAll('#is-gray-batch-chat .card-list > li.geek-info-card:not(.has-read)');
+      const newCardsAfterScroll = iframeDoc.querySelectorAll(cardSelector);
       if (newCardsAfterScroll.length === resumeCards.length && !newResumeActuallyProcessedInThisPass) {
         // 检查 previousCardCount 而不是 resumeCards.length，因为 resumeCards.length 是滚动前的数量
         console.log('滚动后卡片数量未增加，且本轮未处理新简历。可能已到达底部。');
         await autoScroll(iframeDoc); // 再尝试滚动一次
         await new Promise(resolve => setTimeout(resolve, 3000));
 
-        const finalCheck = iframeDoc.querySelectorAll('#is-gray-batch-chat .card-list > li.geek-info-card:not(.has-read)');
+        const finalCheck = iframeDoc.querySelectorAll(cardSelector);
         if (finalCheck.length === newCardsAfterScroll.length) {
           console.log('二次滚动后卡片数量仍未增加，确认已到达底部，结束分析。');
           isAnalyzing = false;
