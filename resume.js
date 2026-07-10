@@ -3266,6 +3266,11 @@ async function handleSearchPageAnalysis(button) {
       await new Promise(resolve => setTimeout(resolve, 3000));
 
       const newCardsAfterScroll = iframeDoc.querySelectorAll('#is-gray-batch-chat .card-list > li.geek-info-card:not(.has-read)');
+      // 新卡片加载后回到列表顶部
+      if (newCardsAfterScroll.length > resumeCards.length) {
+        var listContainer = iframeDoc.querySelector('.card-list') || iframeDoc.querySelector('.geek-list-wrap');
+        if (listContainer) { listContainer.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      }
       if (newCardsAfterScroll.length === resumeCards.length && !newResumeActuallyProcessedInThisPass) {
         // 检查 previousCardCount 而不是 resumeCards.length，因为 resumeCards.length 是滚动前的数量
         console.log('滚动后卡片数量未增加，且本轮未处理新简历。可能已到达底部。');
@@ -4449,6 +4454,11 @@ async function handleRecommendPageAnalysis(button) {
 
       // 计算新加载的卡片数量
       const newCardsCount = newCards.length - resumeCards.length;
+      // 新卡片加载后回到列表顶部
+      if (newCardsCount > 0) {
+        var listContainer2 = iframeDoc.querySelector('.card-list') || iframeDoc.querySelector('.recommend-card-list');
+        if (listContainer2) { listContainer2.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      }
       console.log(`检测到${newCardsCount}个新加载的简历卡片`);
 
       // 如果有新卡片，且数量达到或超过15个，直接处理而不继续滚动

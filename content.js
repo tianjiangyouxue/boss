@@ -297,7 +297,9 @@ function setupEventListeners(container) {
   const downloadHtmlButton = container.querySelector('.action-button:nth-child(1)');
   const downloadExcelButton = container.querySelector('.action-button:nth-child(2)');
   const downloadResumesButton = container.querySelector('#downloadResumesBtn');
-  const clearButton = container.querySelector('.action-button:nth-child(4)');
+  const backupBtn = container.querySelector('#backupBtn');
+  const restoreBtn = container.querySelector('#restoreBtn');
+  const clearButton = Array.from(container.querySelectorAll('.action-button')).find(b => b.textContent.includes('清空'));
   const filterCheckbox = container.querySelector('.qualified-filter');
   
   // 防止重复添加事件监听器
@@ -372,6 +374,18 @@ function setupEventListeners(container) {
       console.log('清空按钮被点击');
       clearResults();
     });
+  }
+
+  // 备份数据按钮
+  if (backupBtn && !backupBtn.hasClickListener) {
+    backupBtn.hasClickListener = true;
+    backupBtn.addEventListener('click', () => backupData());
+  }
+
+  // 恢复数据按钮
+  if (restoreBtn && !restoreBtn.hasClickListener) {
+    restoreBtn.hasClickListener = true;
+    restoreBtn.addEventListener('click', () => restoreData());
   }
 
   // 拖动相关变量
@@ -1382,6 +1396,72 @@ function clearResults() {
   dialogContainer.querySelector('.cancel').addEventListener('click', () => {
     document.body.removeChild(dialogContainer);
   });
+}
+
+// ====== 备份/恢复数据 ======
+async function backupData() {
+  try {
+    var data = { version: 1, date: new Date().toISOString(), results: [], settings: {} };
+    // IndexedDB 数据
+    if (window.ResumeDB && window.ResumeDB.loadAll) {
+      data.results = await window.ResumeDB.loadAll();
+    } else {
+      data.results = window.resumeManager?.analysisResults || [];
+    }
+    // chrome.storage 设置
+    var storage = await new Promise(function(r) { chrome.storage.sync.get(null, r); });
+    data.settings = storage;
+    var daily = await new Promise(function(r) { chrome.storage.local.get(['dailyCounts','analyzedResumeIds'], r); });
+    data.daily = daily;
+
+    var json = JSON.stringify(data, null, 2);
+    var blob = new Blob([json], {type:'application/json'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'BOSS助手备份_' + new Date().toISOString().slice(0,10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    alert('备份成功！已下载 ' + data.results.length + ' 份简历数据');
+  } catch(e) {
+    console.error('备份失败:', e);
+    alert('备份失败: ' + e.message);
+  }
+}
+
+function restoreData() {
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json';
+  input.onchange = async function() {
+    try {
+      var file = input.files[0];
+      if (!file) return;
+      var text = await new Promise(function(r) { var fr = new FileReader(); fr.onload = function(e) { r(e.target.result); }; fr.readAsText(file); });
+      var data = JSON.parse(text);
+      if (!data.version || !data.results) { alert('无效的备份文件'); return; }
+      if (!confirm('即将恢复 ' + data.results.length + ' 份简历数据，当前数据将被覆盖。确认继续？')) return;
+
+      // 恢复 IndexedDB
+      if (window.ResumeDB && window.ResumeDB.clear) {
+        await window.ResumeDB.clear();
+        for (var i = 0; i < data.results.length; i++) {
+          await window.ResumeDB.save(data.results[i]);
+        }
+      }
+      // 恢复内存
+      window.resumeManager.analysisResults = data.results;
+      if (data.settings) await new Promise(function(r) { chrome.storage.sync.set(data.settings, r); });
+      if (data.daily) await new Promise(function(r) { chrome.storage.local.set(data.daily, r); });
+
+      updateResultsDisplay();
+      alert('恢复成功！已恢复 ' + data.results.length + ' 份简历数据');
+    } catch(e) {
+      console.error('恢复失败:', e);
+      alert('恢复失败: ' + e.message);
+    }
+  };
+  input.click();
 }
 
 // 自动滚动函数

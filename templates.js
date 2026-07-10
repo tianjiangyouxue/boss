@@ -47,6 +47,8 @@ const templates = {
         <button class="action-button">下载HTML</button>
         <button class="action-button">导出Excel</button>
         <button class="action-button" id="downloadResumesBtn">💾 下载简历</button>
+        <button class="action-button" id="backupBtn">📦 备份</button>
+        <button class="action-button" id="restoreBtn">📥 恢复</button>
         <button class="action-button">清空结果</button>
       </div>
     </div>
