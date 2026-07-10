@@ -24,6 +24,11 @@ const templates = {
       <span id="errorMessage"></span>
       <span class="close-btn">✕</span>
     </div>
+    <div class="hr-tabs" style="display:flex; border-bottom:1px solid #eee; background:#fafafa;">
+      <button class="hr-tab active" data-tab="analyze" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:13px; border-bottom:2px solid #06b95d; color:#06b95d; font-weight:500;">🔍 AI读简历</button>
+      <button class="hr-tab" data-tab="collect" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:13px; border-bottom:2px solid transparent; color:#666;">📩 求简历</button>
+    </div>
+    <div class="hr-tab-panel" data-panel="analyze">
     <div class="hr-results">
       <div class="results-header">
         <span class="results-count">已分析 0 份简历</span>
@@ -58,6 +63,18 @@ const templates = {
         <button class="action-button" id="restoreBtn">📥 恢复</button>
         <button class="action-button">清空结果</button>
       </div>
+    </div>
+    </div>
+    <div class="hr-tab-panel" data-panel="collect" style="display:none; padding:16px;">
+      <div style="font-size:12px; color:#666; line-height:1.6; margin-bottom:14px; background:#f5f7fa; padding:10px 12px; border-radius:6px; border-left:3px solid #06b95d;">
+        自动遍历沟通页<b>未读</b>对话：<br>
+        • 附件简历可下载 → 自动下载<br>
+        • 附件简历灰色、求简历可点 → 自动求简历<br>
+        • 都不可用 → 跳过下一个<br>
+        <span style="color:#faad14;">仅在沟通页(chat/index)可用，计入每日分享额度</span>
+      </div>
+      <button class="collect-start-btn" id="chatCollectBtn" style="width:100%; padding:10px; background:#06b95d; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; font-weight:500;">▶ 开始求简历</button>
+      <div class="collect-status" id="collectStatus" style="margin-top:12px; font-size:13px; color:#333; text-align:center; line-height:1.8;"></div>
     </div>
   `,
 

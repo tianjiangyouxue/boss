@@ -772,6 +772,7 @@ window.resumeManager = window.resumeManager || {
   extractNewRecommendPageResumeContent,
   generateShareLink,
   captureCardOnly,
+  handleChatResumeCollection,
   // 新增：完整简历内容提取函数
   extractFullResumeContent
 };
@@ -3742,6 +3743,142 @@ async function handleChatPageAnalysis(button) {
   }
 
   console.log(`聊天页面简历分析完成，本次共处理 ${processedIds.size} 份简历`);
+}
+
+// ==================== 沟通页自动求简历/下载附件 ====================
+// 独立功能：遍历未读对话 → 附件简历可下则下载，否则求简历可点则点击
+async function handleChatResumeCollection() {
+  console.log('[求简历] 开始沟通页采集');
+  var status = document.getElementById('collectStatus');
+  var setStatus = function(t) { if (status) status.textContent = t; showPanelMsg(t); };
+
+  // 沟通页专用的堆叠弹窗定位（对话详情工具栏在主文档，可能有多个残留，取激活的）
+  function _stkZ(el) { var z=0,p=el; while(p&&p!==document.body){ var zi=parseInt(getComputedStyle(p).zIndex,10); if(!isNaN(zi))z=Math.max(z,zi); p=p.parentElement; } return z; }
+  function _pickActive(sel) { var els=Array.from(document.querySelectorAll(sel)).filter(function(e){var r=e.getBoundingClientRect();return r.width>10&&r.height>10&&e.offsetParent!==null}); if(!els.length)return null; els.sort(function(a,b){return _stkZ(a)-_stkZ(b)}); return els[els.length-1]; }
+  var sleep = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
+
+  // 1. 切换到"未读"筛选
+  try {
+    var filterSpans = Array.from(document.querySelectorAll('.chat-message-filter span, .chat-message-filter-right span, .chat-label-top span'));
+    var unread = filterSpans.find(function(s){ return (s.textContent||'').trim() === '未读'; });
+    if (unread && !unread.classList.contains('active')) {
+      unread.click();
+      console.log('[求简历] 已切到未读筛选');
+      await sleep(1500);
+    } else {
+      console.log('[求简历] 未读筛选:', unread ? '已是未读' : '未找到筛选按钮');
+    }
+  } catch(e) { console.warn('[求简历] 切未读失败:', e.message); }
+
+  // 2. 等聊天列表
+  try { await waitForElement('.chat-user .user-container, .geek-item', 8000); }
+  catch(e) { setStatus('未找到聊天列表'); return; }
+
+  var processed = new Set();
+  var downloaded = 0, requested = 0, skipped = 0;
+  var previousCount = 0, sameCountTimes = 0;
+
+  while (isAnalyzing) {
+    // 每日分享额度检查
+    var dc = await getDailyCounts();
+    if (dc.share >= DAILY_SHARE_LIMIT) {
+      setStatus('今日分享额度('+DAILY_SHARE_LIMIT+')已满，停止');
+      break;
+    }
+
+    // 未读对话列表项（.geek-item[data-id]）
+    var items = Array.from(document.querySelectorAll('.geek-item[data-id]'));
+    if (items.length === previousCount) {
+      if (++sameCountTimes >= 3) { console.log('[求简历] 列表无新增，结束'); break; }
+    } else { previousCount = items.length; sameCountTimes = 0; }
+
+    var newHandled = false;
+    for (var i = 0; i < items.length; i++) {
+      if (!isAnalyzing) { console.log('[求简历] 已中断'); return; }
+      var item = items[i];
+      var dataId = item.getAttribute('data-id');
+      if (!dataId || processed.has(dataId)) continue;
+      processed.add(dataId);
+      newHandled = true;
+
+      var name = (item.querySelector('.geek-name')?.textContent || '').trim() || dataId;
+
+      try {
+        // 点开对话
+        item.click();
+        await sleep(1200);
+        // 等对话详情/工具栏出现
+        try { await waitForElement('.resume-btn-content, .operate-exchange-left, .chat-conversation', 5000); } catch(e) {}
+        await sleep(400);
+
+        // 判断附件简历：可点 = <a class="resume-btn-file"> 且无 disabled
+        var fileBtn = _pickActive('.resume-btn-file');
+        var fileAvail = fileBtn && fileBtn.tagName === 'A' && !fileBtn.classList.contains('disabled');
+
+        if (fileAvail) {
+          fileBtn.click();
+          await sleep(1200);
+          downloaded++;
+          incDailyShare();
+          setStatus('下载'+name+' | 已下载'+downloaded+' 求'+requested+' 跳'+skipped);
+          console.log('[求简历] 下载附件:', name);
+          continue;
+        }
+
+        // 附件灰 → 判断求简历：.operate-btn 文字含"求简历" 且无 disabled
+        var reqBtn = Array.from(document.querySelectorAll('.operate-btn')).filter(function(b){
+          return (b.textContent||'').indexOf('求简历') >= 0 && b.offsetParent !== null;
+        });
+        // 取激活弹窗内的
+        var reqActive = reqBtn.sort(function(a,b){return _stkZ(a)-_stkZ(b)}).pop();
+        var reqAvail = reqActive && !reqActive.classList.contains('disabled');
+
+        if (reqAvail) {
+          reqActive.click();
+          await sleep(800);
+          // 确认弹窗："确定向牛人索取简历吗？" → 找确认按钮
+          var confirmed = false;
+          var boxes = Array.from(document.querySelectorAll('.exchange-tooltip, [class*="tooltip"], [class*="confirm"], [class*="popup"]'));
+          for (var b = 0; b < boxes.length; b++) {
+            if (!/确定向牛人索取简历|索取简历|确认/.test(boxes[b].textContent || '')) continue;
+            // 在这个框里找"确定/确认"按钮
+            var okBtn = Array.from(boxes[b].querySelectorAll('button, span, a, div')).find(function(x){
+              var t=(x.textContent||'').trim(); return (t==='确定'||t==='确认'||t==='是') && x.offsetParent!==null && !x.querySelector('*');
+            });
+            if (okBtn) { okBtn.click(); confirmed = true; break; }
+          }
+          await sleep(800);
+          requested++;
+          incDailyShare();
+          setStatus('求简历'+name+(confirmed?'':'(未确认)')+' | 已下载'+downloaded+' 求'+requested+' 跳'+skipped);
+          console.log('[求简历] 求简历:', name, confirmed ? '已确认' : '未找到确认按钮');
+          continue;
+        }
+
+        // 都不可用
+        skipped++;
+        setStatus('跳过'+name+' | 已下载'+downloaded+' 求'+requested+' 跳'+skipped);
+        console.log('[求简历] 跳过(附件+求简历均灰):', name);
+      } catch (e) {
+        console.warn('[求简历] 处理', name, '出错:', e.message);
+      }
+
+      // 随机延时防检测
+      await sleep(600 + Math.random() * 500);
+    }
+
+    // 本轮无新处理 → 滚动加载更多
+    if (!newHandled) {
+      var listWrap = document.querySelector('.chat-user .user-container') || document.querySelector('.geek-list-wrap');
+      if (listWrap) {
+        listWrap.scrollTop = listWrap.scrollHeight;
+        await sleep(2000);
+      } else break;
+    }
+  }
+
+  setStatus('完成：下载'+downloaded+' 求简历'+requested+' 跳过'+skipped);
+  console.log('[求简历] 结束 下载'+downloaded+' 求'+requested+' 跳'+skipped);
 }
 
 async function extractChatPageResumeContent(doc, resumeId) {

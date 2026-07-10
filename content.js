@@ -389,6 +389,57 @@ function setupEventListeners(container) {
     restoreBtn.addEventListener('click', () => restoreData());
   }
 
+  // Tab 切换（AI读简历 / 求简历）
+  const tabs = container.querySelectorAll('.hr-tab');
+  tabs.forEach(tab => {
+    if (tab.hasClickListener) return;
+    tab.hasClickListener = true;
+    tab.addEventListener('click', () => {
+      const name = tab.getAttribute('data-tab');
+      container.querySelectorAll('.hr-tab').forEach(t => {
+        const active = t === tab;
+        t.classList.toggle('active', active);
+        t.style.borderBottomColor = active ? '#06b95d' : 'transparent';
+        t.style.color = active ? '#06b95d' : '#666';
+        t.style.fontWeight = active ? '500' : 'normal';
+      });
+      container.querySelectorAll('.hr-tab-panel').forEach(p => {
+        p.style.display = p.getAttribute('data-panel') === name ? '' : 'none';
+      });
+    });
+  });
+
+  // 求简历按钮（沟通页采集）
+  const chatCollectBtn = container.querySelector('#chatCollectBtn');
+  if (chatCollectBtn && !chatCollectBtn.hasClickListener) {
+    chatCollectBtn.hasClickListener = true;
+    chatCollectBtn.addEventListener('click', async () => {
+      if (isAnalyzing) {
+        // 再次点击 = 停止
+        isAnalyzing = false;
+        chatCollectBtn.textContent = '▶ 开始求简历';
+        chatCollectBtn.style.background = '#06b95d';
+        return;
+      }
+      if (!window.location.pathname.includes('/web/chat/index')) {
+        alert('请在「沟通」页面使用此功能\n(打开 Boss 直聘的沟通/消息页)');
+        return;
+      }
+      isAnalyzing = true;
+      chatCollectBtn.textContent = '■ 停止';
+      chatCollectBtn.style.background = '#ff4d4f';
+      try {
+        await window.resumeManager.handleChatResumeCollection();
+      } catch (e) {
+        console.error('求简历流程出错:', e);
+      } finally {
+        isAnalyzing = false;
+        chatCollectBtn.textContent = '▶ 开始求简历';
+        chatCollectBtn.style.background = '#06b95d';
+      }
+    });
+  }
+
   // 拖动相关变量
   let isDragging = false;
   let currentX;
