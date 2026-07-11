@@ -13,6 +13,7 @@ const replacements = {
   '$$BACKEND_URL$$': isPaid ? 'http://192.168.5.235:8866' : 'http://192.168.110.22:8866',
   '$$IS_PAID$$': isPaid ? 'true' : 'false',
   '$$CREDITS_REQUIRED$$': isPaid ? 'true' : 'false',
+  '$$APP_NAME$$': isPaid ? 'BOSS直聘AI助手' : 'BOSS直聘助手',
 };
 function applyReplacements(code) {
   let result = code;
@@ -107,11 +108,11 @@ for (const file of jsFiles) {
   console.log(`  ${file}: ${(origSize/1024).toFixed(0)}KB → ${(obfSize/1024).toFixed(0)}KB`);
 }
 
-// Copy static files (apply replacements for HTML/CSS)
+// Copy static files (apply replacements for HTML/CSS/JSON)
 for (const file of staticFiles) {
   const src = path.join(srcDir, file);
   if (!fs.existsSync(src)) continue;
-  if (/\.(html|css)$/i.test(file)) {
+  if (/\.(html|css|json)$/i.test(file)) {
     var sc = fs.readFileSync(src, 'utf8');
     sc = applyReplacements(sc);
     fs.writeFileSync(path.join(outDir, file), sc);
