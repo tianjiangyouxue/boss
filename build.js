@@ -10,7 +10,7 @@ const isPaid = BUILD_TARGET === 'paid';
 
 // 占位符 → 实际值替换映射
 const replacements = {
-  '$$BACKEND_URL$$': isPaid ? 'https://api.hrassistent.online' : 'http://192.168.110.22:8866',
+  '$$BACKEND_URL$$': isPaid ? 'http://192.168.5.235:8866' : 'http://192.168.110.22:8866',
   '$$IS_PAID$$': isPaid ? 'true' : 'false',
   '$$CREDITS_REQUIRED$$': isPaid ? 'true' : 'false',
 };
@@ -27,7 +27,7 @@ const outDir = path.join(srcDir, 'dist');
 
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
 
-console.log(`=== BUILD_TARGET: ${BUILD_TARGET} (${isPaid ? '收费版' : '免费版'}) ===`);
+console.log(`=== BUILD_TARGET: ${BUILD_TARGET} (${isPaid ? 'Pro版' : '内部版'}) ===`);
 console.log('  BACKEND_URL =', replacements['$$BACKEND_URL$$']);
 console.log('  CREDITS_REQUIRED =', replacements['$$CREDITS_REQUIRED$$']);
 
@@ -126,5 +126,5 @@ const imgDst = path.join(outDir, imgDir);
 if (!fs.existsSync(imgDst)) fs.mkdirSync(imgDst);
 fs.readdirSync(imgSrc).forEach(f => fs.copyFileSync(path.join(imgSrc, f), path.join(imgDst, f)));
 
-console.log(`\nDone! ${(totalOrig/1024).toFixed(0)}KB → ${(totalObf/1024).toFixed(0)}KB (${isPaid?'付费版':'免费版'})`);
+console.log(`\nDone! ${(totalOrig/1024).toFixed(0)}KB → ${(totalObf/1024).toFixed(0)}KB (${isPaid?'Pro版':'内部版'})`);
 console.log(`Output: ${outDir}`);

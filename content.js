@@ -173,6 +173,12 @@ async function init() {
     console.log('开始添加键盘快捷键');
     addKeyboardShortcuts();
 
+    // ====== Pro 版：支付激活检查 ======
+    if ('$$IS_PAID$$' === 'true') {
+      checkProActivation();
+      setInterval(checkProActivation, 300000); // 每5分钟提醒
+    }
+
     // 设置事件监听
     setupEventListeners(container);
 
@@ -1099,6 +1105,38 @@ async function getApiKey() {
       }
     });
   });
+}
+
+// Pro 版：支费状态检查（计费已付费 + 未付费数，提醒激活）
+async function checkProActivation() {
+  if (!('$$IS_PAID$$' === 'true')) return;
+  try {
+    var uid = 'pro_install_' + (window.navigator.hardwareConcurrency || '1') + '_' + (window.screen.width || 0);
+    var hash = '';
+    for (var i = 0; i < uid.length; i++) { hash += uid.charCodeAt(i).toString(16); }
+    var key = 'pro_stat_' + hash.slice(-8);
+
+    var store = await new Promise(function(r) { chrome.storage.local.get([key], r); });
+    var data = store[key] || { paid: false, count: 0 };
+
+    // 更新累计计数
+    var all = await new Promise(function(r) { chrome.storage.local.get(['pro_total_count'], r); });
+    var total = (all.pro_total_count || 0) + 1;
+    await new Promise(function(r) { chrome.storage.local.set({ 'pro_total_count': total }, r); });
+
+    var container = document.getElementById('errorContainer');
+    if (container) {
+      var msg = container.querySelector('#errorMessage');
+      if (msg) {
+        msg.innerHTML = data.paid
+          ? '✅ <b>已激活 Pro 版</b> — 已付费用户'
+          : '⚠️ <b>Pro 版未付费</b> — 如需激活请联系微信 autoairesume — 当前已安装: ' + total + ' 人';
+        container.classList.add('show');
+        container.style.background = data.paid ? '#f6ffed' : '#fffbe6';
+        container.style.border = data.paid ? '1px solid #b7eb8f' : '1px solid #ffe58f';
+      }
+    }
+  } catch(e) { console.warn('Pro check:', e.message); }
 }
 
 // 获取剩余积分（自定义模式下跳过官方积分检查）
