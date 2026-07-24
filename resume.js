@@ -885,7 +885,7 @@ async function deepseekRequest(body) {
 
 
 // 优化后的保存分析结果函数
-function saveAnalysisResults() {
+async function saveAnalysisResults() {
   // 使用 Map 提高查找效率
   const uniqueMap = new Map();
 
