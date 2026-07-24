@@ -175,7 +175,7 @@ async function init() {
 
     // ====== Pro 版：支付激活检查 ======
     if ('$$IS_PAID$$' === 'true') {
-      checkProActivation();
+      await checkProActivation();
       setInterval(checkProActivation, 300000); // 每5分钟提醒
     }
 
