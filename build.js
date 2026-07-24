@@ -10,7 +10,7 @@ const isPaid = BUILD_TARGET === 'paid';
 
 // 占位符 → 实际值替换映射
 const replacements = {
-  '$$BACKEND_URL$$': isPaid ? 'http://192.168.5.235:8866' : 'http://192.168.110.22:8866',
+  '$$BACKEND_URL$$': isPaid ? 'https://score.rzcf.com:4433/score/score-api/boss' : 'http://192.168.5.235:8866',
   '$$IS_PAID$$': isPaid ? 'true' : 'false',
   '$$CREDITS_REQUIRED$$': isPaid ? 'true' : 'false',
   '$$APP_NAME$$': isPaid ? 'BOSS直聘AI助手' : 'BOSS直聘助手',
@@ -28,7 +28,7 @@ const outDir = path.join(srcDir, 'dist');
 
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
 
-console.log(`=== BUILD_TARGET: ${BUILD_TARGET} (${isPaid ? 'Pro版' : '内部版'}) ===`);
+console.log(`=== BUILD_TARGET: ${BUILD_TARGET} (${isPaid ? 'pro' : 'free'}) ===`);
 console.log('  BACKEND_URL =', replacements['$$BACKEND_URL$$']);
 console.log('  CREDITS_REQUIRED =', replacements['$$CREDITS_REQUIRED$$']);
 
@@ -127,5 +127,11 @@ const imgDst = path.join(outDir, imgDir);
 if (!fs.existsSync(imgDst)) fs.mkdirSync(imgDst);
 fs.readdirSync(imgSrc).forEach(f => fs.copyFileSync(path.join(imgSrc, f), path.join(imgDst, f)));
 
-console.log(`\nDone! ${(totalOrig/1024).toFixed(0)}KB → ${(totalObf/1024).toFixed(0)}KB (${isPaid?'Pro版':'内部版'})`);
+// ★ free 恢复原始 Logo
+if (!isPaid && fs.existsSync(path.join(srcDir, imgDir, 'icon_internal.png'))) {
+  fs.copyFileSync(path.join(srcDir, imgDir, 'icon_internal.png'), path.join(outDir, imgDir, 'icon.png'));
+  console.log('  Logo: free原图标');
+}
+
+console.log(`\nDone! ${(totalOrig/1024).toFixed(0)}KB → ${(totalObf/1024).toFixed(0)}KB (${isPaid?'pro':'free'})`);
 console.log(`Output: ${outDir}`);

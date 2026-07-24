@@ -1,5 +1,10 @@
 {
   "devDependencies": {
+    "canvas": "^3.2.3",
     "javascript-obfuscator": "^5.4.6"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^3.11.174",
+    "sharp": "^0.35.3"
   }
 }

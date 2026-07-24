@@ -78,5 +78,60 @@ document.addEventListener('DOMContentLoaded', async () => {
   const closeBtn = document.querySelector('.error-container .close-btn');
   if (closeBtn) closeBtn.addEventListener('click', () => { const el = document.getElementById('errorContainer'); if (el) el.classList.remove('show'); });
 
+  // Pro 版激活码
+  if ('$$IS_PAID$$' === 'true') {
+    document.getElementById('proActivation').style.display = '';
+    var activateBtn = document.getElementById('activateBtn');
+    var activateCode = document.getElementById('activateCode');
+    var activateMsg = document.getElementById('activateMsg');
+
+    // 刷新激活/试用状态（查后端 + 本地缓存）
+    async function refreshActivation() {
+      var result = await chrome.storage.local.get(['pro_activated', 'pro_trial_remaining']);
+      var remaining = result.pro_trial_remaining;
+      // 尝试同步后端
+      try {
+        var resp = await new Promise(function(resolve, reject) {
+          chrome.runtime.sendMessage({ action: 'trialProxy', body: { action: 'status', activated: result.pro_activated || false } }, function(r) {
+            if (r && r.ok) resolve(r.data); else reject(new Error());
+          });
+        });
+        remaining = resp.remaining;
+        await chrome.storage.local.set({ 'pro_trial_remaining': remaining });
+      } catch(e) {}
+
+      if (remaining > 0) {
+        activateMsg.innerHTML = '<span style="color:' + (remaining >= 50 ? '#52c41a' : '#1890ff') + ';">🎁 剩余 ' + remaining + ' 次</span>';
+        activateBtn.textContent = '激活'; activateBtn.disabled = false; activateBtn.style.background = '#06b95d';
+      } else {
+        activateMsg.innerHTML = '<span style="color:#ff4d4f;">⚠️ 次数已用完</span>';
+        activateBtn.textContent = '激活'; activateBtn.disabled = false; activateBtn.style.background = '#ff4d4f';
+      }
+    }
+    refreshActivation();
+
+    // 激活码验证（后端核销）
+    activateBtn.addEventListener('click', async function() {
+      var code = activateCode.value.trim();
+      if (!code) { activateMsg.innerHTML = '<span style="color:#ff4d4f;">请输入激活码</span>'; return; }
+      activateMsg.innerHTML = '<span style="color:#1890ff;">激活中...</span>';
+      try {
+        var resp = await new Promise(function(resolve, reject) {
+          chrome.runtime.sendMessage({ action: 'trialProxy', body: { action: 'activate', code: code } }, function(r) {
+            if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+            if (r && r.ok) resolve(r.data); else reject(new Error((r && r.error) || 'network'));
+          });
+        });
+        if (resp.ok) {
+          await chrome.storage.local.set({ 'pro_trial_remaining': resp.remaining });
+          refreshActivation();
+          activateMsg.innerHTML = '<span style="color:#52c41a;">🎉 激活成功！剩余 ' + resp.remaining + ' 次</span>';
+        } else {
+          activateMsg.innerHTML = '<span style="color:#ff4d4f;">❌ 激活码无效</span>';
+        }
+      } catch(e) { activateMsg.innerHTML = '<span style="color:#ff4d4f;">网络异常，请重试(' + (e.message||'').substring(0,20) + ')</span>'; }
+    });
+  }
+
   try { await loadConfig(); await loadSettings(); } catch (e) { console.error('初始化失败:', e); }
 });

@@ -419,6 +419,20 @@ function setupEventListeners(container) {
   const chatCollectBtn = container.querySelector('#chatCollectBtn');
   if (chatCollectBtn && !chatCollectBtn.hasClickListener) {
     chatCollectBtn.hasClickListener = true;
+    // 下载简历按钮
+    const chatDownloadBtn = container.querySelector('#chatDownloadBtn');
+    if (chatDownloadBtn && !chatDownloadBtn._dlwired) {
+      chatDownloadBtn._dlwired = true;
+      chatDownloadBtn.addEventListener('click', async () => {
+        if (isAnalyzing) { isAnalyzing = false; chatDownloadBtn.textContent = '💾 下载简历附件'; return; }
+        if (!window.location.pathname.includes('/web/chat/index')) { alert('请在沟通页面使用'); return; }
+        isAnalyzing = true; chatDownloadBtn.textContent = '■ 停止';
+        try { await window.resumeManager.handleChatResumeDownload(); }
+        catch(e) { console.error(e); }
+        finally { isAnalyzing = false; chatDownloadBtn.textContent = '💾 下载简历附件'; }
+      });
+    }
+
     chatCollectBtn.addEventListener('click', async () => {
       if (isAnalyzing) {
         // 再次点击 = 停止
@@ -445,6 +459,33 @@ function setupEventListeners(container) {
       }
     });
   }
+
+  // ★ 人才库
+  var talentSearch = container.querySelector('#talentSearch');
+  var talentList = container.querySelector('#talentList');
+  var talentCount = container.querySelector('#talentCount');
+  var talentRefreshBtn = container.querySelector('#talentRefreshBtn');
+  async function loadTalentPool(filter) {
+    if (!talentList) return;
+    try {
+      var recs = (await new Promise(function(r){ chrome.storage.local.get('dl_records', r); })).dl_records || [];
+      if (!filter) filter = ''; var kw = filter.toLowerCase();
+      var filtered = recs.filter(function(r){ return !kw || (r.name||'').indexOf(kw)>=0 || (r.file||'').indexOf(kw)>=0 || (r.cloud||'').indexOf(kw)>=0; });
+      var html = '';
+      for (var i = 0; i < filtered.length; i++) {
+        var r = filtered[i];
+        html += '<div style="background:#fff;border:1px solid #eee;border-radius:8px;padding:10px 12px;margin-bottom:8px;">' +
+          '<div style="display:flex;justify-content:space-between;"><strong style="font-size:13px;">'+(r.name||'?')+'</strong><span style="font-size:11px;color:#999;">'+(r.time||'').substring(0,10)+'</span></div>'+
+          '<div style="font-size:11px;color:#666;margin-top:4px;">'+(r.file||'')+'</div>'+
+          (r.cloud?'<div style="margin-top:3px;"><a href="'+r.cloud+'" target="_blank" style="font-size:11px;color:#1677ff;">☁ 查看云PDF</a></div>':'')+
+        '</div>';
+      }
+      talentList.innerHTML = html || '<div style="text-align:center;color:#999;padding:20px;">暂无下载记录</div>';
+      if (talentCount) talentCount.textContent = '共 '+filtered.length+' 条';
+    } catch(e) { console.warn('人才库:', e); }
+  }
+  if (talentSearch) talentSearch.addEventListener('input', function(){ loadTalentPool(this.value); });
+  if (talentRefreshBtn) talentRefreshBtn.addEventListener('click', function(){ loadTalentPool(talentSearch?talentSearch.value:''); });
 
   // 拖动相关变量
   let isDragging = false;
@@ -625,8 +666,10 @@ async function updateResultsDisplay() {
   // 清空旧的结果
   resultsListContainer.innerHTML = '';
   
-  // 按时间倒序显示结果，并应用过滤
-  currentResults.slice().reverse().forEach(result => {
+  // 按时间倒序显示结果（新→旧），显式按 timestamp 排序，不依赖数组原始顺序
+  currentResults.slice().sort(function(a, b) {
+    return new Date(b.timestamp || 0) - new Date(a.timestamp || 0);
+  }).forEach(result => {
     const score = result.evaluation?.score || 0;
     const isQualified = score >= scoreThreshold;
 
@@ -1107,66 +1150,118 @@ async function getApiKey() {
   });
 }
 
-// Pro 版：支费状态检查（计费已付费 + 未付费数，提醒激活）
+// Pro 版：生成稳定的设备指纹（多维度，删插件后仍一致，用于防换IP绕过）
+function getDeviceFingerprint() {
+  try {
+    var parts = [
+      navigator.hardwareConcurrency || 0,
+      navigator.deviceMemory || 0,
+      screen.width + 'x' + screen.height,
+      screen.colorDepth || 0,
+      (navigator.platform || ''),
+      (navigator.language || ''),
+      (Intl.DateTimeFormat().resolvedOptions().timeZone || ''),
+      (navigator.maxTouchPoints || 0)
+    ];
+    var str = 'pro_' + parts.join('|');
+    var h = 0;
+    for (var i = 0; i < str.length; i++) { h = ((h << 5) - h + str.charCodeAt(i)) | 0; }
+    return 'dev_' + (h >>> 0).toString(16);
+  } catch(e) { return 'dev_fallback'; }
+}
+window.getDeviceFingerprint = getDeviceFingerprint;
+
+// Pro 版：试用检查（后端记录次数，前端不存）
 async function checkProActivation() {
   if (!('$$IS_PAID$$' === 'true')) return;
   try {
-    var uid = 'pro_install_' + (window.navigator.hardwareConcurrency || '1') + '_' + (window.screen.width || 0);
-    var hash = '';
-    for (var i = 0; i < uid.length; i++) { hash += uid.charCodeAt(i).toString(16); }
-    var key = 'pro_stat_' + hash.slice(-8);
+    var actResult = await new Promise(function(r) { chrome.storage.local.get(['pro_activated', 'pro_trial_remaining', 'pro_trial_claimed'], r); });
+    var isActivated = actResult.pro_activated;
+    var remaining = actResult.pro_trial_remaining;
+    var claimed = actResult.pro_trial_claimed;
 
-    var store = await new Promise(function(r) { chrome.storage.local.get([key], r); });
-    var data = store[key] || { paid: false, count: 0 };
-
-    // 更新累计计数
-    var all = await new Promise(function(r) { chrome.storage.local.get(['pro_total_count'], r); });
-    var total = (all.pro_total_count || 0) + 1;
-    await new Promise(function(r) { chrome.storage.local.set({ 'pro_total_count': total }, r); });
+    // 首次或缓存无数据 → 调后端
+    if (!isActivated && (remaining === undefined || !claimed)) {
+      try {
+        var dev = getDeviceFingerprint();
+        // 先注册 trial/claim
+        var claimResult = await new Promise(function(resolve, reject) {
+          chrome.runtime.sendMessage({ action: 'trialProxy', body: { action: 'claim', device: dev } }, function(r) {
+            if (r && r.ok) resolve(r.data); else reject(new Error(r?.error));
+          });
+        });
+        remaining = claimResult.remaining;
+        await new Promise(function(r) { chrome.storage.local.set({ 'pro_trial_remaining': remaining, 'pro_trial_claimed': true }, r); });
+      } catch(e) {
+        // 后端不通 → 用缓存兜底
+        console.warn('Trial claim failed:', e.message);
+        remaining = remaining !== undefined ? remaining : 10;
+      }
+    }
 
     var container = document.getElementById('errorContainer');
     if (container) {
       var msg = container.querySelector('#errorMessage');
       if (msg) {
-        msg.innerHTML = data.paid
-          ? '✅ <b>已激活 Pro 版</b> — 已付费用户'
-          : '⚠️ <b>Pro 版未付费</b> — 如需激活请联系微信 autoairesume — 当前已安装: ' + total + ' 人';
+        if (remaining > 0) {
+          msg.innerHTML = '🎁 <b>剩余 ' + remaining + ' 次</b>';
+          container.style.background = remaining >= 50 ? '#f6ffed' : '#fff2f0';
+          container.style.border = remaining >= 50 ? '1px solid #b7eb8f' : '1px solid #ffccc7';
+        } else {
+          msg.innerHTML = '⚠️ <b>次数已用完</b>';
+          container.style.background = '#fff2f0'; container.style.border = '1px solid #ffccc7';
+        }
         container.classList.add('show');
-        container.style.background = data.paid ? '#f6ffed' : '#fffbe6';
-        container.style.border = data.paid ? '1px solid #b7eb8f' : '1px solid #ffe58f';
       }
     }
   } catch(e) { console.warn('Pro check:', e.message); }
 }
 
-// 获取剩余积分（自定义模式下跳过官方积分检查）
+// Pro 版：每次分析消耗1次试用（后端记录，防篡改）
+async function consumeTrial() { window.consumeTrial = consumeTrial;
+  if (!('$$IS_PAID$$' === 'true')) return;
+  try {
+    var actResult = await new Promise(function(r) { chrome.storage.local.get(['pro_activated'], r); });
+    if (actResult.pro_activated) return;
+    // 调后端记录消耗（带设备指纹）
+    var data = await new Promise(function(resolve, reject) {
+      chrome.runtime.sendMessage({ action: 'trialProxy', body: { action: 'use', activated: false, device: getDeviceFingerprint() } }, function(r) {
+        if (r && r.ok) resolve(r.data); else reject(new Error(r?.error));
+      });
+    });
+    // 本地缓存剩余次数
+    await new Promise(function(r) { chrome.storage.local.set({ 'pro_trial_remaining': data.remaining }, r); });
+    checkProActivation();
+  } catch(e) { console.warn('Trial use failed:', e.message); }
+}
+
+// 获取剩余积分（试用次数用完且未激活时阻止）
 async function getCredit() {
   // 免费版不检查积分
   if (!('$$CREDITS_REQUIRED$$' === 'true')) {
     return 999999;
   }
-  // 收费版：调公网 /api/info 查剩余积分
+  // Pro 版：后端查试用状态（次数由服务端控制）
   try {
-    const environment = await getCurrentEnvironment();
-    const apiKey = await getApiKey();
-    console.log('[Credit] 环境:', environment, 'apiKey长度:', apiKey?.length || 0);
-    if (!apiKey) { throw new Error('未设置API密钥'); }
-    const baseUrl = window.API_CONFIG[environment].baseUrl;
-    const response = await fetch(`${baseUrl}/api/info`, {
-      headers: { 'Authorization': `Bearer ${apiKey}` }
-    });
-    if (!response.ok) {
-      if (response.status === 403) throw new Error('API密钥无效或已过期');
-      throw new Error(`获取积分信息失败 (${response.status})`);
-    }
-    const data = await response.json();
-    if (!data || typeof data.remainingCredits === 'undefined') {
-      throw new Error('积分数据格式不正确');
-    }
-    return data.remainingCredits;
+    var actChk = await new Promise(function(r) { chrome.storage.local.get(['pro_activated', 'pro_trial_remaining'], r); });
+    if (actChk.pro_activated) return 999999;
+    if ((actChk.pro_trial_remaining || 0) > 0) return 999999;
+    // 本地缓存用完 → 同步后端一次
+    try {
+      var statusData = await new Promise(function(resolve, reject) {
+        chrome.runtime.sendMessage({ action: 'trialProxy', body: { action: 'status', activated: false, device: getDeviceFingerprint() } }, function(rr) {
+          if (rr && rr.ok) resolve(rr.data); else reject(new Error(rr?.error));
+        });
+      });
+      if (statusData.remaining === -1 || statusData.remaining > 0) {
+        await new Promise(function(rr) { chrome.storage.local.set({ 'pro_trial_remaining': statusData.remaining }, rr); });
+        return 999999;
+      }
+    } catch(e) {}
+    return 0; // 试用用完或网络异常
   } catch (error) {
     console.error('获取积分出错:', error);
-    throw error;
+    return 0;
   }
 }
 
@@ -1311,7 +1406,12 @@ async function startAIAnalysis() {
         if (path.includes('/web/chat/search')) {
           await handleSearchPageAnalysis(button);
         } else if (path.includes('/web/chat/index')) {
-          await handleChatPageAnalysis(button);
+          // 沟通页面暂不支持
+          showError('沟通页面暂不支持 AI 读简历，请在「搜索」或「推荐牛人」页面使用');
+          isAnalyzing = false;
+          stopAnalysis();
+          resolve();
+          return;
         } else if (path.includes('/web/chat/recommend')) {
           await handleRecommendPageAnalysis(button);
         }

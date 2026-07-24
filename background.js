@@ -1,3 +1,23 @@
+// ★ 下载完成 → 通知页面
+if (chrome.downloads) {
+  chrome.downloads.onChanged.addListener(function(delta) {
+    if (delta.state && delta.state.current === 'complete') {
+      chrome.downloads.search({id: delta.id}, function(results) {
+        if (results && results[0]) {
+          var r = results[0];
+          chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+            if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, {
+              action: 'downloadComplete',
+              fileName: r.filename.split(/[\\/]/).pop(),
+              url: r.url
+            });
+          });
+        }
+      });
+    }
+  });
+}
+
 // 整合所有消息处理到一个监听器
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // 处理GET_TAB_ID消息
@@ -80,9 +100,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true; // 保持消息通道开放
   }
 
+  if (request.action === 'startDownload') {
+    if (request.url) { chrome.downloads.download({url: request.url, saveAs: false}, function(id) { sendResponse({ok: !chrome.runtime.lastError}); }); }
+    else { sendResponse({ok: false}); }
+    return true;
+  }
+
   if (request.action === 'paddleLocal') {
     // 代理本地 PaddleOCR (绕过 HTTPS 混合内容限制)
-    fetch('http://192.168.110.22:8866/ocr', {
+    fetch('$$BACKEND_URL$$/ocr', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image: request.b64 })
@@ -96,6 +122,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'deepseekProxy') {
     // 代理 DeepSeek 调用 — API key 只存在于后端
     fetch('$$BACKEND_URL$$/deepseek/proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request.body)
+    })
+      .then(r => r.json())
+      .then(data => sendResponse({ ok: true, data: data }))
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+
+  if (request.action === 'trialProxy') {
+    // 代理试用请求（绕过 HTTPS 混合内容限制），body.action 决定具体端点
+    var action = (request.body && request.body.action) || 'claim';
+    var url = '$$BACKEND_URL$$/trial/' + action;
+    fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request.body)

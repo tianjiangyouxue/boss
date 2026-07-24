@@ -7,11 +7,14 @@
     "scripting",
     "activeTab",
     "storage",
-    "tabs"
+    "tabs",
+    "downloads"
   ],
   "host_permissions": [
     "https://*.zhipin.com/*",
     "https://zhipin.com/*",
+    "https://score.rzcf.com:4433/*",
+    "http://192.168.5.235:8088/*",
     "<all_urls>"
   ],
   "icons": {

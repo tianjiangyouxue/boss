@@ -25,8 +25,9 @@ const templates = {
       <span class="close-btn">✕</span>
     </div>
     <div class="hr-tabs" style="display:flex; border-bottom:1px solid #eee; background:#fafafa;">
-      <button class="hr-tab active" data-tab="analyze" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:13px; border-bottom:2px solid #06b95d; color:#06b95d; font-weight:500;">🔍 AI读简历</button>
-      <button class="hr-tab" data-tab="collect" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:13px; border-bottom:2px solid transparent; color:#666;">📩 求简历</button>
+      <button class="hr-tab active" data-tab="analyze" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid #06b95d; color:#06b95d; font-weight:500;">🔍 AI读简历</button>
+      <button class="hr-tab" data-tab="collect" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid transparent; color:#666;">📩 求简历</button>
+      <button class="hr-tab" data-tab="talent" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid transparent; color:#666;">👤 人才库</button>
     </div>
     <div class="hr-tab-panel" data-panel="analyze">
     <div class="hr-results">
@@ -74,7 +75,16 @@ const templates = {
         <span style="color:#faad14;">仅在沟通页(chat/index)可用，计入每日分享额度</span>
       </div>
       <button class="collect-start-btn" id="chatCollectBtn" style="width:100%; padding:10px; background:#06b95d; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; font-weight:500;">▶ 开始求简历</button>
+      <button class="collect-start-btn" id="chatDownloadBtn" style="width:100%; padding:10px; background:#1677ff; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:14px; font-weight:500; margin-top:8px;">💾 下载简历附件</button>
       <div class="collect-status" id="collectStatus" style="margin-top:12px; font-size:13px; color:#333; text-align:center; line-height:1.8;"></div>
+    </div>
+    <div class="hr-tab-panel" data-panel="talent" style="display:none; padding:12px;">
+      <div style="margin-bottom:10px; display:flex; gap:6px;">
+        <input type="text" id="talentSearch" placeholder="搜索..." style="flex:1; padding:6px 10px; border:1px solid #d9d9d9; border-radius:6px; font-size:12px; outline:none;">
+        <button id="talentRefreshBtn" style="padding:6px 12px; background:#06b95d; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px;">刷新</button>
+      </div>
+      <div id="talentList" style="max-height:450px; overflow-y:auto; font-size:12px;"></div>
+      <div id="talentCount" style="text-align:center; color:#999; font-size:11px; margin-top:8px;"></div>
     </div>
   `,
 
@@ -612,7 +622,7 @@ const templates = {
           '期望地点', '期望职位', '期望薪资',
           '最近公司', '最近职位',
           '评分', '是否达标', '评价建议',
-          '分享链接', '分享卡片图', '分析时间'
+          '分析时间'
         ]
       ];
 
@@ -636,9 +646,6 @@ const templates = {
           score.toString(),
           isQualified ? '是' : '否',
           result.evaluation?.suggestion || '无',
-          result.prompt_name || '默认模板',
-          result.shareLink || '无',
-          result.shareCardImage ? '已保存' : '无',
           new Date(result.timestamp).toLocaleString()
         ]);
       });

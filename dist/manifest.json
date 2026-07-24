@@ -1,17 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "BOSS直聘AI助手",
+  "name": "BOSS直聘助手",
   "version": "0.2.0",
   "description": "AI批量筛选Boss直聘简历，自动评分+收藏+打招呼+下载，支持推荐/搜索/沟通页面，HR高效招聘神器",
   "permissions": [
     "scripting",
     "activeTab",
     "storage",
-    "tabs"
+    "tabs",
+    "downloads"
   ],
   "host_permissions": [
     "https://*.zhipin.com/*",
     "https://zhipin.com/*",
+    "https://score.rzcf.com:4433/*",
+    "http://192.168.5.235:8088/*",
     "<all_urls>"
   ],
   "icons": {

@@ -29,7 +29,7 @@ function protectSendMessage(msg, callback) {
 
 // ====== 每日用量限制 ======
 const DAILY_BROWSE_LIMIT = 100;
-const DAILY_SHARE_LIMIT = 50;
+const DAILY_SHARE_LIMIT = 100;
 
 function todayKey() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth()+1) + '-' + d.getDate(); }
 
@@ -51,6 +51,45 @@ async function incDailyShare() {
   const d = await getDailyCounts(); d.share++; d.date = todayKey();
   await new Promise(r => chrome.storage.local.set({ dailyCounts: d }, r));
   return d;
+}
+
+// ★ 检查试用次数，返回剩余次数（0=用完）。仅 Pro 版生效
+async function checkTrialRemaining() {
+  if (!('$$IS_PAID$$' === 'true')) return 999999;
+  try {
+    var result = await new Promise(function(r) { chrome.storage.local.get(['pro_activated', 'pro_trial_remaining'], r); });
+    if (result.pro_activated) return 999999;
+    // 优先用后端实时查
+    try {
+      var resp = await new Promise(function(resolve, reject) {
+        chrome.runtime.sendMessage({ action: 'trialProxy', body: { action: 'status', activated: false, device: (typeof getDeviceFingerprint==='function' ? getDeviceFingerprint() : '') } }, function(rr) {
+          if (rr && rr.ok) resolve(rr.data); else reject(new Error());
+        });
+      });
+      await new Promise(function(r) { chrome.storage.local.set({ 'pro_trial_remaining': resp.remaining }, r); });
+      return resp.remaining;
+    } catch(e) {
+      // 后端不通 → 用本地缓存兜底
+      return result.pro_trial_remaining !== undefined ? result.pro_trial_remaining : 10;
+    }
+  } catch(e) { return 999999; }
+}
+
+async function checkTrialRemaining() {
+  if (!('1586IS_PAID1586' === 'true')) return 999999;
+  try {
+    var _trRes = await new Promise(function(r) { chrome.storage.local.get(["pro_activated", "pro_trial_remaining"], r); });
+    if (_trRes.pro_activated) return 999999;
+    try {
+      var _trResp = await new Promise(function(resolve, reject) {
+        chrome.runtime.sendMessage({ action: "trialProxy", body: { action: "status", activated: false } }, function(rr) {
+          if (rr && rr.ok) resolve(rr.data); else reject(new Error());
+        });
+      });
+      await new Promise(function(r) { chrome.storage.local.set({ "pro_trial_remaining": _trResp.remaining }, r); });
+      return _trResp.remaining;
+    } catch(e) { return _trRes.pro_trial_remaining !== undefined ? _trRes.pro_trial_remaining : 10; }
+  } catch(e) { return 999999; }
 }
 
 // 在面板显示提示
@@ -508,42 +547,66 @@ function getShareOptions() {
 // 点"转发"→"转发至其他"→截卡片图→关闭弹窗
 async function captureCardOnly(doc) {
   try {
-    // ★ 每日分享限制
-    const sc = await getDailyCounts();
-    if (sc.share >= DAILY_SHARE_LIMIT) {
-      showPanelMsg('今日分享'+DAILY_SHARE_LIMIT+'次已满');
-      return {shareLink:null,shareCardImage:null};
-    }
-
-    // 1. 找转发按钮 ★ 从当前激活弹窗内搜，避免堆叠弹窗命中旧弹窗
-    // 复用已有的 pickActive 风格
+    // 1. 找转发按钮 ★ 从主文档+所有 iframe 子文档搜（推荐/沟通页按钮在 iframe 内）
+    //    （截卡片图不耗分享额度，只有 generateShareLink 发邮件才消耗日50次限制）
     var _stk = function(el) { var z=0,p=el; while(p&&p!==document.body){ var zi=parseInt(getComputedStyle(p).zIndex,10); if(!isNaN(zi))z=Math.max(z,zi); p=p.parentElement; } return z; };
     var _pAct = function(sel,root) { var els=Array.from((root||document).querySelectorAll(sel)).filter(function(e){var r=e.getBoundingClientRect();return r.width>50&&r.height>50}); if(!els.length)return null; els.sort(function(a,b){return _stk(a)-_stk(b)}); return els[els.length-1]; };
-    var activeDlg = _pAct('.dialog-lib-resume') || _pAct('.lib-standard-resume') || document;
-    var btn = Array.from(activeDlg.querySelectorAll('span,i,em,div,button')).find(function(el){
-      var t=(el.textContent||'').trim();return(t==='转发'||t==='分享')&&el.offsetParent&&!el.querySelector('*');
-    });
-    // 兜底：iframe 内搜索（从激活弹窗的 iframe 搜）
-    if(!btn){try{var ifs=document.querySelectorAll('iframe');for(var i=0;i<ifs.length;i++){try{var fd=ifs[i].contentDocument;if(fd){btn=Array.from(fd.querySelectorAll('span,i,em,div,button')).find(function(el){var t=(el.textContent||'').trim();return(t==='转发'||t==='分享')&&el.offsetParent&&!el.querySelector('*')});if(btn)break}}catch(e){}}}catch(e){}}
-    if(!btn) return {shareLink:null,shareCardImage:null};
+    var _findRec = function(sel, rootDoc) {
+      if (!rootDoc || !rootDoc.querySelectorAll) return null;
+      var f = _pAct(sel, rootDoc); if (f) return f;
+      try { var ifs = rootDoc.querySelectorAll('iframe'); for (var k=0; k<ifs.length; k++) { try { var _r=ifs[k].getBoundingClientRect(); if(_r.width<10||_r.height<10) continue; var _st=(ifs[k].ownerDocument.defaultView||window).getComputedStyle(ifs[k]); if(_st.display==='none'||_st.visibility==='hidden') continue; var fd = ifs[k].contentDocument; if (fd) { f = _findRec(sel, fd); if (f) return f; } } catch(e) {} } } catch(e) {}
+      return null;
+    };
+    var findForwardBtn = function(rootDoc) {
+      // 收集主文档+所有【可见】子iframe里的转发/分享按钮，返回所在弹窗 z-index 最高的那个
+      var cands = [];
+      var _z = function(el){var z=0,p=el;while(p&&p.nodeType===1){var zi=parseInt((el.ownerDocument.defaultView||window).getComputedStyle(p).zIndex,10);if(!isNaN(zi))z=Math.max(z,zi);p=p.parentElement;}return z;};
+      var _iframeVisible = function(f){ try{ var r=f.getBoundingClientRect(); if(r.width<10||r.height<10) return false; var st=(f.ownerDocument.defaultView||window).getComputedStyle(f); if(st.display==='none'||st.visibility==='hidden'||st.opacity==='0') return false; return true; }catch(e){ return false; } };
+      var walk = function(d) {
+        if (!d || !d.querySelectorAll) return;
+        try {
+          Array.from(d.querySelectorAll('span,i,em,div,button')).forEach(function(el){
+            var t=(el.textContent||'').trim();
+            if((t==='转发'||t==='分享')&&el.offsetParent&&!el.querySelector('*')) cands.push(el);
+          });
+        } catch(e) {}
+        // ★ 只进【可见】iframe，跳过隐藏的推荐/搜索残留 frame（防止点到旧页面的转发按钮）
+        try { var ifs=d.querySelectorAll('iframe'); for(var i=0;i<ifs.length;i++){ try{ if(!_iframeVisible(ifs[i])) continue; var fd=ifs[i].contentDocument; if(fd) walk(fd);}catch(e){} } } catch(e) {}
+      };
+      walk(rootDoc);
+      if (!cands.length) return null;
+      cands.sort(function(a,b){ return _z(a)-_z(b); });
+      return cands[cands.length-1]; // 最上层弹窗的转发按钮
+    };
+    // ★ 先关闭所有残留的旧分享弹窗（防止推荐→搜索切换串卡）
+    await closeAllShareBoxes();
+
+    var btn = findForwardBtn(document);
+    if (!btn) return {shareLink:null,shareCardImage:null};
 
     // 2. 点转发→弹窗
+    await closeAllShareBoxes(); // 再确认一次没有残留
     btn.click();
     await new Promise(function(r){setTimeout(r,800)});
 
-    // 3. 找"转发至其他"并点击（显示分享卡片）— 复用前文的 _pAct
-    var shareBox=_pAct('.c-share-box');
+    // 3. 找"转发至其他"并点击（显示分享卡片）— 递归搜主文档+iframe
+    var shareBox=_findRec('.c-share-box', document);
     var opts=shareBox?shareBox.querySelectorAll('.item-content, .nav-list .item'):document.querySelectorAll('.c-share-box .item-content, .c-share-box .nav-list .item');
     if(!opts||!opts.length){var ll=(shareBox||document).querySelector('.left-list');opts=ll?ll.querySelectorAll('.item'):[]}
     var other=Array.from(opts).find(function(el){return el.textContent.includes('转发至其他')});
     if(other){other.click();await new Promise(function(r){setTimeout(r,900)})}
 
-    // 4. ★直接读取分享卡片 <img class="share-image"> 的 base64 src —— 完整精确，无需截图裁剪
-    var cardImage=null;
-    for(var t=0;t<14;t++){ // 轮询等卡片图片生成
-      var imgEl=(shareBox||document).querySelector('img.share-image, .share-image');
-      if(imgEl&&imgEl.src&&imgEl.src.indexOf('data:image')===0&&imgEl.src.length>1000){cardImage=imgEl.src;break}
-      await new Promise(function(r){setTimeout(r,250)});
+    // 4. ★ 等新图生成——BOSS 缓存旧卡片，需确认是当前简历的图（非上一次截的）
+    var cardImage = null;
+    // 记录上一次成功截取的卡片指纹（前200字符），新卡必须不同
+    var _lastCardFp = captureCardOnly._lastFp || '';
+    for (var t = 0; t < 18; t++) {
+      var imgEl = (shareBox || document).querySelector('img.share-image, .share-image');
+      if (imgEl && imgEl.src && imgEl.src.indexOf('data:image') === 0 && imgEl.src.length > 1000) {
+        var fp = imgEl.src.substring(100, 300); // 取中间一段当指纹
+        if (fp !== _lastCardFp) { cardImage = imgEl.src; captureCardOnly._lastFp = fp; break; }
+      }
+      await new Promise(function(r) { setTimeout(r, 350); });
     }
 
     // 4b. 兜底：读不到 img 就截图裁剪弹窗右侧卡片区（含 DPR 修正）
@@ -579,33 +642,30 @@ async function generateShareLink(doc = document) {
 
     console.log('开始生成分享链接...');
 
-    // 1. 点击转发按钮 ★ 从当前激活弹窗内搜
-    var _stk2 = function(el) { var z=0,p=el; while(p&&p!==document.body){ var zi=parseInt(getComputedStyle(p).zIndex,10); if(!isNaN(zi))z=Math.max(z,zi); p=p.parentElement; } return z; };
-    var _pAct2 = function(sel,root) { var els=Array.from((root||document).querySelectorAll(sel)).filter(function(e){var r=e.getBoundingClientRect();return r.width>50&&r.height>50}); if(!els.length)return null; els.sort(function(a,b){return _stk2(a)-_stk2(b)}); return els[els.length-1]; };
-    var activeDialog2 = _pAct2('.dialog-lib-resume') || _pAct2('.lib-standard-resume') || doc;
-    let shareButton = null;
-    const allEls = Array.from(activeDialog2.querySelectorAll('span, i, em, div, button'));
-    shareButton = allEls.find(el => {
-      const t = (el.textContent || '').trim();
-      return (t === '转发' || t === '分享') && el.offsetParent && !el.querySelector('*');
-    });
-    // 旧版 class 兜底（从激活弹窗）
-    if (!shareButton) shareButton = activeDialog2.querySelector('.resume-layout-wrap .share i, div.icon-coop-forward, em.iboss-zhuanfa, div.share > i');
-    // iframe 内查找
-    if (!shareButton) {
-      const iframes = doc.querySelectorAll('iframe');
-      for (const f of iframes) {
+    // 1. 点击转发按钮 ★ 递归搜主文档+所有 iframe（推荐/沟通页按钮在 iframe 内）
+    var findForwardBtn2 = function(rootDoc) {
+      // 收集所有转发/分享按钮，返回所在弹窗 z-index 最高（最上层）的那个
+      var cands = [];
+      var _z = function(el){var z=0,p=el;while(p&&p.nodeType===1){var zi=parseInt((el.ownerDocument.defaultView||window).getComputedStyle(p).zIndex,10);if(!isNaN(zi))z=Math.max(z,zi);p=p.parentElement;}return z;};
+      var _iframeVisible = function(f){ try{ var r=f.getBoundingClientRect(); if(r.width<10||r.height<10) return false; var st=(f.ownerDocument.defaultView||window).getComputedStyle(f); if(st.display==='none'||st.visibility==='hidden'||st.opacity==='0') return false; return true; }catch(e){ return false; } };
+      var walk = function(d) {
+        if (!d || !d.querySelectorAll) return;
         try {
-          const fd = f.contentDocument || f.contentWindow?.document;
-          if (!fd) continue;
-          shareButton = Array.from(fd.querySelectorAll('span, i, em, div')).find(el => {
-            const t = (el.textContent || '').trim();
-            return (t === '转发' || t === '分享') && el.offsetParent;
+          Array.from(d.querySelectorAll('span,i,em,div,button')).forEach(function(el){
+            var t=(el.textContent||'').trim();
+            if((t==='转发'||t==='分享')&&el.offsetParent&&!el.querySelector('*')) cands.push(el);
           });
-          if (shareButton) break;
         } catch(e) {}
-      }
-    }
+        // ★ 只进可见 iframe，跳过隐藏的推荐/搜索残留 frame
+        try { var ifs=d.querySelectorAll('iframe'); for(var i=0;i<ifs.length;i++){ try{ if(!_iframeVisible(ifs[i])) continue; var fd=ifs[i].contentDocument; if(fd) walk(fd);}catch(e){} } } catch(e) {}
+      };
+      walk(rootDoc);
+      if (!cands.length) return null;
+      cands.sort(function(a,b){ return _z(a)-_z(b); });
+      return cands[cands.length-1];
+    };
+    let shareButton = findForwardBtn2(document);
+    if (!shareButton) shareButton = findForwardBtn2(doc);
     if (!shareButton) {
       // Canvas 简历无转发按钮 → 直接截整页作为卡片图
       console.log('[分享] 无转发按钮，截取整页作为卡片');
@@ -617,6 +677,8 @@ async function generateShareLink(doc = document) {
       incDailyShare();
       return { shareLink: null, shareCardImage: ss };
     }
+    // ★ 关旧分享弹窗后再打开新的
+    await closeAllShareBoxes();
     shareButton.click();
 
     // 等待分享弹窗出现
@@ -624,7 +686,22 @@ async function generateShareLink(doc = document) {
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     // 查找转发选项 ★ 从当前激活的 c-share-box 内查找
-    var activeShareBox = _pAct2('.c-share-box');
+    var _stk2 = function(el) { var z=0,p=el; while(p&&p!==document.body){ var zi=parseInt(getComputedStyle(p).zIndex,10); if(!isNaN(zi))z=Math.max(z,zi); p=p.parentElement; } return z; };
+    var _pAct2 = function(sel,root) { var els=Array.from((root||document).querySelectorAll(sel)).filter(function(e){var r=e.getBoundingClientRect();return r.width>50&&r.height>50}); if(!els.length)return null; els.sort(function(a,b){return _stk2(a)-_stk2(b)}); return els[els.length-1]; };
+    // ★ 递归搜主文档 + 所有子 iframe（推荐页弹窗在 recommendFrame 内）
+    var _findRecursive = function(sel, rootDoc) {
+      if (!rootDoc || !rootDoc.querySelectorAll) return null;
+      var found = _pAct2(sel, rootDoc);
+      if (found) return found;
+      try {
+        var ifs = rootDoc.querySelectorAll('iframe');
+        for (var k=0; k<ifs.length; k++) {
+          try { var fd = ifs[k].contentDocument; if (fd) { found = _findRecursive(sel, fd); if (found) return found; } } catch(e) {}
+        }
+      } catch(e) {}
+      return null;
+    };
+    var activeShareBox = _findRecursive('.c-share-box', document);
     let allOptions;
     if (activeShareBox) {
       allOptions = activeShareBox.querySelectorAll('.item-content, .nav-list .item');
@@ -684,9 +761,10 @@ async function generateShareLink(doc = document) {
       console.warn('[分享] 左侧菜单不可见，关闭卡片重试...');
       var cx = (activeShareBox||document).querySelector('.boss-popup__close i, [class*="close"] i');
       if (cx) { cx.click(); await new Promise(r => setTimeout(r, 300)); }
+      await closeAllShareBoxes();
       shareButton.click();
       await new Promise(r => setTimeout(r, 800));
-      activeShareBox = _pAct2('.c-share-box'); // 重新找激活弹窗
+      activeShareBox = _findRecursive('.c-share-box', document); // 重新找激活弹窗
       allOptions = (activeShareBox||document).querySelectorAll('.item-content, .nav-list .item');
       if (!allOptions || !allOptions.length) {
         const ll = (activeShareBox||document).querySelector('.left-list');
@@ -722,6 +800,11 @@ async function generateShareLink(doc = document) {
 
     console.log('邮件转发已提交, cardImage:', cardImage ? (cardImage.length/1024).toFixed(0)+'KB' : 'NULL');
     incDailyShare();
+    // ★ 关闭分享弹窗，防止堆叠
+    try {
+      const closeBtn = (activeShareBox||document).querySelector('.boss-popup__close i, .iboss-close, [class*="close"] i, [class*="close"]');
+      if (closeBtn) { closeBtn.click(); await new Promise(r => setTimeout(r, 300)); }
+    } catch(e) {}
     return { shareLink: null, shareCardImage: cardImage };
 
   } catch (error) {
@@ -749,6 +832,8 @@ window.resumeManager = window.resumeManager || {
   extractCardInnerInfo,
   evaluateResume,
   closeResume,
+  forceCloseResumeDialog,
+  checkTrialRemaining,
   favoriteResume,
   isResumeFavorited,
   saveAnalyzedResumeId,
@@ -773,6 +858,8 @@ window.resumeManager = window.resumeManager || {
   generateShareLink,
   captureCardOnly,
   handleChatResumeCollection,
+  handleChatResumeDownload,
+  checkTrialRemaining,
   // 新增：完整简历内容提取函数
   extractFullResumeContent
 };
@@ -782,8 +869,11 @@ function getModel() {
   return Promise.resolve('deepseek-chat');
 }
 
-// DeepSeek 调用统一走后端代理，API key 只存在于服务端（后端地址由构建时 $$BACKEND_URL$$ 决定）
+// AI分析 调用统一走后端代理，API key 只存在于服务端（后端地址由构建时 $$BACKEND_URL$$ 决定）
 async function deepseekRequest(body) {
+  // ★ 调AI分析前检查试用次数
+  var tr = await checkTrialRemaining();
+  if (tr <= 0) throw new Error('次数已用完');
   return new Promise((resolve, reject) => {
     protectSendMessage({ action: 'deepseekProxy', body }, response => {
       if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
@@ -866,10 +956,8 @@ function saveAnalysisResults() {
   const uniqueResults = Array.from(uniqueMap.values());
   window.resumeManager.analysisResults = uniqueResults;
 
-  // IndexedDB 持久化
-  const imgResults = window.resumeManager.analysisResults.filter(r => r.resumeImage);
-  if (imgResults.length) console.log(`[DB] 含截图 ${imgResults.length} 份`);
-  window.ResumeDB.save(uniqueResults[uniqueResults.length - 1]).catch(e => console.warn('[DB] 保存失败:', e));
+  // IndexedDB 持久化 — 全量保存（不止最后一条）
+  window.ResumeDB.saveAll(uniqueResults).catch(e => console.warn('[DB] 全量保存失败:', e));
 }
 
 // 提取简历内容函数
@@ -1436,7 +1524,7 @@ async function evaluateResume(resumeContent, doc = document) {
 
     // 调试：强制弹窗确认走到了这里
     const hasText = !!(resumeContent.fullText && resumeContent.fullText.length > 20);
-    DEBUG && showPanelMsg(hasText ? '文本提取成功,跳过OCR' : '文本为空,走OCR');
+    DEBUG && showPanelMsg(hasText ? '文本提取成功,跳过AI识别' : '文本为空,走AI识别');
 
     // 检查是否提取失败（包含 error 属性），如果是，强制触发视觉识别
     if (resumeContent.error || (!resumeContent.fullText && !resumeContent.name)) {
@@ -1447,28 +1535,28 @@ async function evaluateResume(resumeContent, doc = document) {
         chrome.storage.local.get(['apiMode', 'customApiConfig'], resolve);
       });
 
-      // ========== 修改：先OCR提取，再评估 ==========
+      // ========== 修改：先AI识别提取，再评估 ==========
       try {
         const prompt_template = await getUserPrompt();
         const templateName = prompt_template?.name || '默认模板';
 
         // 1. 先获取截图
-        console.log('[OCR] 第一步：截取简历图片...');
+        console.log('[AI识别] 第一步：截取简历图片...');
         const imageList = await captureFullResumeScreenshot(doc);
         if (!imageList || imageList.length === 0) {
           throw new Error('无法生成简历截图');
         }
-        console.log(`[OCR] 已获取 ${imageList.length} 张截图`);
+        console.log(`[AI识别] 已获取 ${imageList.length} 张截图`);
 
-        // 2. 调用OCR服务提取文字（分开调用）
-        console.log('[OCR] 第二步：调用OCR服务提取文字...');
+        // 2. 调用AI识别服务提取文字（分开调用）
+        console.log('[AI识别] 第二步：调用AI识别服务提取文字...');
         const ocrResultText = await callOfficialOcrService(imageList);
         
         if (!ocrResultText || !ocrResultText.trim()) {
-          throw new Error('OCR服务未返回有效内容');
+          throw new Error('AI识别服务未返回有效内容');
         }
 
-        // 3. 解析OCR结果
+        // 3. 解析AI识别结果
         let structuredResume = null;
         try {
           if (ocrResultText.trim().startsWith('{')) {
@@ -1476,13 +1564,13 @@ async function evaluateResume(resumeContent, doc = document) {
           } else {
             structuredResume = { fullText: ocrResultText };
           }
-          console.log('[OCR] OCR识别成功:', structuredResume.name || '未知姓名');
+          console.log('[AI识别] AI识别识别成功:', structuredResume.name || '未知姓名');
         } catch (e) {
-          console.warn('[OCR] 解析OCR结果失败:', e);
+          console.warn('[AI识别] 解析AI识别结果失败:', e);
           structuredResume = { fullText: ocrResultText };
         }
 
-        // 4. 合并OCR结果到resumeContent（不显示，只用于评估）
+        // 4. 合并AI识别结果到resumeContent（不显示，只用于评估）
         resumeContent = {
           ...resumeContent,
           ...structuredResume,
@@ -1541,8 +1629,8 @@ async function evaluateResume(resumeContent, doc = document) {
         return finalScore;
 
       } catch (ocrError) {
-        console.error('[OCR+Eval] 流程失败:', ocrError);
-        throw new Error(`OCR提取或评估失败: ${ocrError.message}`);
+        console.error('[AI识别+Eval] 流程失败:', ocrError);
+        throw new Error(`AI识别提取或评估失败: ${ocrError.message}`);
       }
       // ========== 修改结束 ==========
     }
@@ -1561,7 +1649,7 @@ async function evaluateResume(resumeContent, doc = document) {
       try {
         const visionText = await performVisionExtraction(doc, resumeContent.resumeId, apiMode, customApiConfig);
         if (visionText) {
-          console.log('视觉识别成功，使用 OCR 文本进行评估');
+          console.log('视觉识别成功，使用 AI识别 文本进行评估');
 
           if (visionText.trim().startsWith('{')) {
             try {
@@ -1571,7 +1659,7 @@ async function evaluateResume(resumeContent, doc = document) {
               if (parsedOcr.gender && (!resumeContent.gender || resumeContent.gender === '未知')) resumeContent.gender = parsedOcr.gender;
               if (parsedOcr.education && (!resumeContent.education || resumeContent.education === '未知')) resumeContent.education = parsedOcr.education;
             } catch (e) {
-              console.warn('解析 OCR 结构化数据失败:', e);
+              console.warn('解析 AI识别 结构化数据失败:', e);
             }
           }
 
@@ -1625,8 +1713,8 @@ async function evaluateResume(resumeContent, doc = document) {
       return customResult.score;
     }
 
-    // 官方 API 模式：先OCR解析图片，再评估结构化数据
-    console.log('使用官方 API 模式（先OCR再评估）');
+    // 官方 API 模式：先AI识别解析图片，再评估结构化数据
+    console.log('使用官方 API 模式（先AI识别再评估）');
 
     // 获取配置
     const apiKey = await getApiKey();
@@ -1639,43 +1727,43 @@ async function evaluateResume(resumeContent, doc = document) {
 
     const prompt = prompt_template.content;
 
-    // NEW STRATEGY: 先 OCR 解析图片得到结构化数据，再用评估接口评估
+    // NEW STRATEGY: 先 AI识别 解析图片得到结构化数据，再用评估接口评估
     let ocrSuccess = false;
     let structuredResume = null;
 
     try {
-      console.log('[OCR] 尝试 OCR 解析模式...');
+      console.log('[AI识别] 尝试 AI识别 解析模式...');
 
       // 如果之前已经成功进行过视觉识别，跳过重复截图
       if (resumeContent.extractionMethod === 'vision-fallback' && resumeContent.fullText) {
-        console.log('[OCR] 之前已完成视觉识别，尝试解析已有结果...');
+        console.log('[AI识别] 之前已完成视觉识别，尝试解析已有结果...');
         try {
           const visionData = JSON.parse(resumeContent.fullText);
           // 如果已有结构化数据，直接使用
           if (visionData.name || visionData.workExperiences) {
             structuredResume = visionData;
             ocrSuccess = true;
-            console.log('[OCR] 使用已有的结构化数据');
+            console.log('[AI识别] 使用已有的结构化数据');
           }
         } catch (e) {
-          console.warn('[OCR] 解析已有视觉识别结果失败:', e);
+          console.warn('[AI识别] 解析已有视觉识别结果失败:', e);
         }
       }
 
-      // 如果没有已有的结构化数据，则重新截图并进行 OCR
+      // 如果没有已有的结构化数据，则重新截图并进行 AI识别
       if (!ocrSuccess) {
         // 1. 获取截图
         const imageList = await captureFullResumeScreenshot(doc);
 
         if (imageList && imageList.length > 0) {
-          // 2. 调用 OCR 服务解析图片
-          console.log('[OCR] 调用 OCR 服务解析图片...');
+          // 2. 调用 AI识别 服务解析图片
+          console.log('[AI识别] 调用 AI识别 服务解析图片...');
           const ocrResultText = await callOfficialOcrService(imageList);
 
           if (ocrResultText && ocrResultText.trim()) {
-            console.log('[OCR] OCR 识别成功，尝试解析结构化数据...');
+            console.log('[AI识别] AI识别 识别成功，尝试解析结构化数据...');
 
-            // 解析 OCR 结果为结构化数据
+            // 解析 AI识别 结果为结构化数据
             try {
               if (ocrResultText.trim().startsWith('{')) {
                 structuredResume = JSON.parse(ocrResultText);
@@ -1687,17 +1775,17 @@ async function evaluateResume(resumeContent, doc = document) {
                 };
               }
               ocrSuccess = true;
-              console.log('[OCR] 结构化数据解析成功:', structuredResume.name || '未知姓名');
+              console.log('[AI识别] 结构化数据解析成功:', structuredResume.name || '未知姓名');
             } catch (e) {
-              console.warn('[OCR] 解析结构化数据失败:', e);
+              console.warn('[AI识别] 解析结构化数据失败:', e);
               structuredResume = { fullText: ocrResultText };
-              ocrSuccess = true; // 仍然认为 OCR 成功，只是没有结构化
+              ocrSuccess = true; // 仍然认为 AI识别 成功，只是没有结构化
             }
           }
         }
       }
 
-      // 3. 如果 OCR 成功，调用评估接口
+      // 3. 如果 AI识别 成功，调用评估接口
       if (ocrSuccess && structuredResume) {
         console.log('[EVAL] 调用评估接口...');
 
@@ -1766,7 +1854,7 @@ async function evaluateResume(resumeContent, doc = document) {
             shareLink: evalResult.shareLink || null, shareCardImage: evalResult.shareCardImage || null,
             timestamp: new Date().toISOString(),
             position: { resumeId: resumeContent.resumeId },
-            prompt_name: prompt_template.name || 'OCR+评估',
+            prompt_name: prompt_template.name || 'AI识别+评估',
           });
 
           await saveAnalysisResults();
@@ -1776,11 +1864,11 @@ async function evaluateResume(resumeContent, doc = document) {
         }
       }
     } catch (e) {
-      console.warn('[OCR+评估] 流程失败，回退到传统文本模式:', e);
+      console.warn('[AI识别+评估] 流程失败，回退到传统文本模式:', e);
     }
 
     // 如果上面成功了，直接返回
-    // --- 以下是原有的文本/OCR 回退逻辑 (作为 Fallback) ---
+    // --- 以下是原有的文本/AI识别 回退逻辑 (作为 Fallback) ---
 
     // 官方模式同样优先开启视觉识别
     if (!resumeContent.fullText || resumeContent.fullText.length < 500 || resumeContent.extractionMethod === 'fallback-innertext') {
@@ -1805,7 +1893,7 @@ async function evaluateResume(resumeContent, doc = document) {
         console.error('官方模式视觉识别失败:', e);
       }
     }
-    // --- 使用之前获取的配置继续执行文本/OCR 回退逻辑 ---
+    // --- 使用之前获取的配置继续执行文本/AI识别 回退逻辑 ---
 
     const prompt_name = prompt_template.name;
 
@@ -2445,16 +2533,39 @@ function showError(message) {
 // 简历操作相关函数
 async function closeResume(doc = document) {
   console.log('关闭简历对话框');
-  const closeButton = doc.querySelector('.boss-dialog__wrapper.dialog-lib-resume .dialog-close') ||
-    doc.querySelector(".boss-dialog__wrapper.resume-common-dialog.search-resume.new-chat-resume-dialog-main-ui.resume-container > div.boss-popup__close") ||
-    doc.querySelector(".boss-dialog__wrapper .dialog-close") ||
-    doc.querySelector("div.boss-popup__close") ||
-    doc.querySelector(".dialog-container .dialog-close")
-
-  if (closeButton) {
-    closeButton.click();
-    await new Promise(resolve => setTimeout(resolve, 500));
+  // ★ 收集所有可搜的文档（主文档 + 传入doc + 所有子iframe），
+  //    确保推荐页弹窗在深层 iframe 里也能被关掉
+  var allDocs = [document];
+  if (doc && doc !== document) allDocs.push(doc);
+  // 递归收集所有子 iframe 文档
+  function collectDocs(root, depth) {
+    if (!root || !root.querySelectorAll || depth > 4) return;
+    try {
+      var ifs = root.querySelectorAll('iframe');
+      for (var i = 0; i < ifs.length; i++) {
+        try {
+          var fd = ifs[i].contentDocument;
+          if (fd && allDocs.indexOf(fd) === -1) { allDocs.push(fd); collectDocs(fd, depth + 1); }
+        } catch(e) {}
+      }
+    } catch(e) {}
   }
+  collectDocs(document, 0);
+  collectDocs(doc !== document ? doc : null, 0);
+
+  for (var d = 0; d < allDocs.length; d++) {
+    var dd = allDocs[d];
+    if (!dd || !dd.querySelector) continue;
+    var btn = dd.querySelector('.boss-popup__wrapper .close') ||
+      dd.querySelector('.boss-popup__wrapper .icon-close') ||
+      dd.querySelector('.boss-popup__wrapper .iboss-close') ||
+      dd.querySelector('.boss-popup__close') ||
+      dd.querySelector('.dialog-close') ||
+      dd.querySelector('.new-resume-online-main-ui .close-btn') ||
+      dd.querySelector('.resume-common-wrap .close');
+    if (btn && btn.offsetParent) { btn.click(); await new Promise(r => setTimeout(r, 500)); console.log('已关闭简历弹窗'); return; }
+  }
+  console.log('未找到可关闭的弹窗');
 }
 
 async function favoriteResume(doc = document) {
@@ -3026,27 +3137,68 @@ async function isResumeFavorited(doc = document) {
   return isFavorited;
 }
 
+// 关闭页面所有残留分享弹窗（含子iframe，推荐→搜索切换时防止串卡）
+async function closeAllShareBoxes() {
+  try {
+    var docs = [document];
+    (function collect(root, depth) {
+      if (!root || !root.querySelectorAll || depth > 4) return;
+      try {
+        var ifs = root.querySelectorAll('iframe');
+        for (var i = 0; i < ifs.length; i++) {
+          try { var fd = ifs[i].contentDocument; if (fd && docs.indexOf(fd) === -1) { docs.push(fd); collect(fd, depth + 1); } } catch(e) {}
+        }
+      } catch(e) {}
+    })(document, 0);
+
+    var closed = 0;
+    var sel = '.c-share-box .iboss-close, .c-share-box .boss-popup__close, .c-share-box .dialog-close, .c-share-box .close, .c-share-box .icon-close';
+    for (var d = 0; d < docs.length; d++) {
+      var dd = docs[d];
+      if (!dd || !dd.querySelectorAll) continue;
+      var btns = dd.querySelectorAll(sel);
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].offsetParent !== null) { btns[i].click(); closed++; }
+      }
+    }
+    if (closed > 0) await new Promise(function(r) { setTimeout(r, 400); });
+    // ★ 点关闭后，强制把仍残留在 DOM 的 .c-share-box 整个移除（BOSS复用元素→旧图残留的根因）
+    var removed = 0;
+    for (var d2 = 0; d2 < docs.length; d2++) {
+      var dd2 = docs[d2];
+      if (!dd2 || !dd2.querySelectorAll) continue;
+      var boxes = dd2.querySelectorAll('.c-share-box');
+      for (var j = 0; j < boxes.length; j++) {
+        try { boxes[j].parentNode && boxes[j].parentNode.removeChild(boxes[j]); removed++; } catch(e) {}
+      }
+    }
+    if (closed > 0 || removed > 0) console.log('清理旧分享弹窗: 关闭' + closed + ' 移除' + removed);
+  } catch(e) {}
+}
+
 // 处理搜索页面的简历分析
 async function handleSearchPageAnalysis(button) {
   console.log('开始处理搜索页面的简历分析');
 
-  const searchFrame = document.querySelector('iframe[name="searchFrame"]');
+  var searchFrame = document.querySelector('iframe[name="searchFrame"]');
   if (!searchFrame) {
     showError('找不到搜索iframe，无法开始分析。');
     throw new Error('找不到搜索 iframe');
   }
-  const iframeDoc = searchFrame.contentDocument || searchFrame.contentWindow.document;
+  var iframeDoc = searchFrame.contentDocument || searchFrame.contentWindow.document;
   console.log('已获取 iframe 文档');
 
   await waitForElementInIframe(iframeDoc, '#is-gray-batch-chat .card-list');
   console.log('简历列表已加载');
 
+  // ★ 关闭所有残留弹窗 + 分享弹窗（防止推荐页→搜索页切换时串卡）
+  await closeAllShareBoxes();
+  await forceCloseResumeDialog([document, iframeDoc], 3);
+
   // 读取"过滤已读简历"设置，动态构建卡片选择器
   var filterRead = await new Promise(function(r) { chrome.storage.sync.get(['filterRead'], function(res) { r(res.filterRead !== undefined ? res.filterRead : true); }); });
   var cardSelector = '#is-gray-batch-chat .card-list > li.geek-info-card' + (filterRead ? ':not(.has-read)' : '');
   console.log('卡片选择器:', cardSelector, '(过滤已读:', filterRead, ')');
-
-  await closeAllResumeDialogs(document);
 
   const processedIds = new Set();
   let previousCardCount = 0;
@@ -3075,6 +3227,15 @@ async function handleSearchPageAnalysis(button) {
       break;
     }
 
+    // ★ 当过滤已读后卡片数为0时，尝试滚动加载更多（而非直接当作"无变化"计数）
+    if (resumeCards.length === 0 && previousCardCount > 0 && filterRead) {
+      console.log('当前视口所有卡片均为已读，滚动加载更多...');
+      await autoScroll(iframeDoc);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      previousCardCount = 0; // 重置以便下轮重新判断
+      sameCardCountTimes = 0;
+      continue;
+    }
     if (resumeCards.length === previousCardCount) {
       sameCardCountTimes++;
       if (sameCardCountTimes >= 3) {
@@ -3180,16 +3341,20 @@ async function handleSearchPageAnalysis(button) {
           let resumeContent;
 
           if (resumeIframe) {
-            // 搜索页面的简历使用Canvas渲染，直接使用截图OCR
-            console.log('检测到搜索页面简历，使用截图OCR提取...');
-            // 创建一个空的简历内容对象，添加error属性以触发OCR fallback
+            // 搜索页面的简历使用Canvas渲染，直接使用截图AI识别
+            console.log('检测到搜索页面简历，使用截图AI识别提取...');
+            // ★ 从卡片 DOM 抓姓名（准确，不受 OCR 影响）
+            var _cardName = '';
+            var _cnEl = card.querySelector('.card-inner .name-wrap .name, .geek-info-card .name, .card-inner .name');
+            if (_cnEl) _cardName = _cnEl.textContent.trim();
+            // 创建一个空的简历内容对象，添加error属性以触发AI识别 fallback
             resumeContent = {
               resumeId,
               fullText: '',
               vueData: null,
               extractionMethod: 'search-page-ocr',
-              error: 'Search page resume uses Canvas, will use OCR',
-              name: '',
+              error: 'Search page resume uses Canvas, will use AI识别',
+              name: _cardName,
               gender: '',
               age: null,
               experience: '',
@@ -3211,10 +3376,13 @@ async function handleSearchPageAnalysis(button) {
           if (!isAnalyzing) return;
 
           try {
+            // ★ 评估前检查试用次数，用完立即停止
+            var trialRem2 = await checkTrialRemaining();
+            if (trialRem2 <= 0) { showPanelMsg('次数已用完'); isAnalyzing = false; return; }
             console.log(`开始AI评估简历 ${resumeId}`);
             const score = await window.resumeManager.evaluateResume(resumeContent, document);
             console.log(`简历 ${resumeId} 评估完成，分数:`, score);
-            incDailyBrowse(); // 每日浏览计数
+            incDailyBrowse(); window.consumeTrial && window.consumeTrial();
             newResumeActuallyProcessedInThisPass = true; // 标记有简历被成功评估
             consecutiveScrollsWithoutNewProcessing = 0; // 重置连续空滚动计数器
 
@@ -3241,12 +3409,7 @@ async function handleSearchPageAnalysis(button) {
                 }
               }
 
-              const shouldAutoShare3 = await window.resumeManager.getAutoShareSetting();
-              if (shouldAutoShare3) {
-                console.log(`执行自动转发至邮箱 (简历 ${resumeId})`);
-                const shareOk = await window.resumeManager.generateShareLink(document);
-                if (shareOk) console.log('转发结果:', shareOk.shareLink ? '成功' : '卡片已截取');
-              }
+              // ★ 自动转发至邮箱 已在评估函数内部完成，此处不重复调用
             }
 
             await window.resumeManager.saveAnalyzedResumeId(resumeId);
@@ -3348,6 +3511,23 @@ async function handleSearchPageAnalysis(button) {
 }
 
 
+// ★ 检测 Boss 频率限制 toast，自动等待恢复
+async function detectAndWaitRateLimit() {
+  try {
+    var toast = document.querySelector('.boss-toast .icon-toast-error');
+    var text = toast && toast.parentElement ? (toast.parentElement.textContent || '') : '';
+    if (/查看太频繁|操作频繁|稍后重试|过于频繁/.test(text)) {
+      // 出现限流 → 等 40-90 秒（真人等待时间）
+      var wait = 40000 + Math.random() * 50000;
+      console.warn('[限流] 检测到"查看太频繁"，等待', Math.round(wait/1000), '秒...');
+      showPanelMsg('⏳ Boss限流，等待' + Math.round(wait/1000) + '秒...');
+      await new Promise(r => setTimeout(r, wait));
+      return true;
+    }
+  } catch(e) {}
+  return false;
+}
+
 // 处理聊天页面的简历分析
 async function handleChatPageAnalysis(button) {
   console.log('开始处理聊天页面的简历分析');
@@ -3362,12 +3542,18 @@ async function handleChatPageAnalysis(button) {
   let sameItemCountTimes = 0;
 
   // 初始清理所有可能存在的弹窗
-  await closeAllResumeDialogs(document);
+  await forceCloseResumeDialog([document], 5);
 
   // 设置防止长时间卡住的定时器
   let dialogTimeoutCheck;
 
   while (isAnalyzing) {
+    // ★ 每日浏览限制
+    var dc2 = await getDailyCounts();
+    if (dc2.browse >= DAILY_BROWSE_LIMIT) {
+      showPanelMsg('今日浏览'+DAILY_BROWSE_LIMIT+'份已满，停止');
+      isAnalyzing = false; return;
+    }
     // 检测付费墙弹窗
     if (detectPaywallPopup(document)) {
       console.log('检测到付费墙弹窗，停止分析');
@@ -3383,25 +3569,45 @@ async function handleChatPageAnalysis(button) {
     dialogTimeoutCheck = setTimeout(async () => {
       if (isAnalyzing) {
         console.log('执行定期检查，查看是否有未关闭的弹窗...');
-        await closeAllResumeDialogs(document);
+        await forceCloseResumeDialog([document], 3);
       }
     }, 60000); // 每60秒检查一次
 
-    // 获取所有用户列表项
-    const userItems = document.querySelectorAll("#container > div:nth-child(1) > div > div.chat-box > div.chat-container > div.chat-user > div.user-container > div > div:nth-child(2) > div");
-    console.log('找到用户列表项数量:', userItems.length);
+    // 获取所有用户列表项（真实结构：.user-list.b-scroll-stable > .geek-item-wrap > .geek-item[data-id]）
+    var allUserItems = Array.from(document.querySelectorAll('.chat-user .user-container .user-list .geek-item, .user-list.b-scroll-stable .geek-item'));
+    console.log('找到用户列表项数量:', allUserItems.length);
 
-    // 检测是否连续多次获取到相同数量的项目但未处理新简历
-    if (userItems.length === previousItemCount) {
-      sameItemCountTimes++;
-      if (sameItemCountTimes >= 3) {
-        console.log('连续多次获取到相同数量的用户且无新简历，可能已到达底部或加载异常，终止分析');
-        break;
+    // ★ 读取"过滤已读简历"设置，过滤已读项（沟通页已读标记是 .status-read）
+    var filterRead = await new Promise(function(r) { chrome.storage.sync.get(['filterRead'], function(res) { r(res.filterRead !== undefined ? res.filterRead : true); }); });
+    var userItems = filterRead
+      ? allUserItems.filter(function(item) { return !item.querySelector('.status-read') && !item.classList.contains('has-read') && !item.classList.contains('has-viewed'); })
+      : allUserItems;
+    console.log('过滤已读后剩余:', userItems.length, '(过滤已读:', filterRead, ')');
+
+    // 计算本轮有多少"未处理过"的项（真正待做的）
+    var pendingItems = userItems.filter(function(item) {
+      var rid = (item.getAttribute('data-id') || (item.getAttribute('id')||'').replace(/^_/,'')).split('-')[0];
+      return rid && !processedIds.has(rid);
+    });
+    console.log('本轮待处理:', pendingItems.length);
+
+    // 本轮无待处理项 → 直接滚动加载更多（不计入"卡住"）
+    if (pendingItems.length === 0) {
+      var sc0 = document.querySelector('.user-list.b-scroll-stable') || document.querySelector('.chat-user .user-container');
+      var beforeLen = allUserItems.length;
+      console.log('本轮无新简历，滚动加载更多...');
+      await autoScroll(sc0);
+      await new Promise(function(r){ setTimeout(r, 3000); });
+      var afterItems = document.querySelectorAll('.user-list .geek-item, .user-list.b-scroll-stable .geek-item');
+      if (afterItems.length === beforeLen) {
+        sameItemCountTimes++;
+        if (sameItemCountTimes >= 3) { console.log('滚动后列表无增长，已到底部，结束'); break; }
+      } else {
+        sameItemCountTimes = 0;
       }
-    } else {
-      previousItemCount = userItems.length;
-      sameItemCountTimes = 0;
+      continue;
     }
+    sameItemCountTimes = 0;
 
     let newResumeFound = false;
     let allCurrentItemsProcessed = true;
@@ -3414,8 +3620,9 @@ async function handleChatPageAnalysis(button) {
         return;
       }
 
-      // 获取简历ID
-      const resumeId = item.getAttribute('key')?.split('-')[0];
+      // 获取简历ID（真实结构：data-id="53854458-0" 或 id="_53854458-0"）
+      var rawId = item.getAttribute('data-id') || (item.getAttribute('id') || '').replace(/^_/, '');
+      const resumeId = rawId ? rawId.split('-')[0] : '';
 
       // 检查这份简历是否已经分析过
       if (!resumeId) {
@@ -3442,13 +3649,18 @@ async function handleChatPageAnalysis(button) {
       try {
         console.log(`正在处理简历 ${resumeId}...`);
         newResumeFound = true;
-        allCurrentItemsProcessed = false;
 
-        // 在打开新简历前，先尝试关闭所有可能存在的简历弹窗
-        await closeAllResumeDialogs(document);
+        // ★ 先检查次数，用完直接跳过（不开弹窗，不浪费操作）
+        var trialRemCard = await checkTrialRemaining();
+        if (trialRemCard <= 0) { showPanelMsg('次数已用完'); isAnalyzing = false; return; }
 
-        // 直接通过ID点击元素
-        document.querySelector(`#_${resumeId}-0`).click();
+        // 在打开新简历前，强力关闭所有残留弹窗（验证真的关掉，防止堆叠）
+        await forceCloseResumeDialog([document], 5);
+
+        // 点击列表项打开对话（优先点 item 本身，兜底用 id 选择器）
+        var clickTarget = item.querySelector('.geek-item-top') || item;
+        if (clickTarget) { clickTarget.click(); }
+        else { var byId = document.querySelector('#_' + rawId) || document.querySelector(`#_${resumeId}-0`); if (byId) byId.click(); }
         await new Promise(resolve => setTimeout(resolve, 500));
 
         // 等待对话框出现
@@ -3621,10 +3833,13 @@ async function handleChatPageAnalysis(button) {
 
         // 调用AI评估
         try {
+          // ★ 评估前检查试用次数
+          var trialRem3 = await checkTrialRemaining();
+          if (trialRem3 <= 0) { showPanelMsg('次数已用完'); isAnalyzing = false; return; }
           console.log('开始AI评估');
           const score = await window.resumeManager.evaluateResume(resumeContent, document);
           console.log('评估完成，分数:', score);
-          incDailyBrowse();
+          incDailyBrowse(); window.consumeTrial && window.consumeTrial();
           if (!isAnalyzing) return;
 
           // 如果分数达标，根据设置决定是否自动收藏和联系Ta
@@ -3656,13 +3871,7 @@ async function handleChatPageAnalysis(button) {
               }
             }
 
-            // 检查是否需要自动转发至邮箱
-            const shouldAutoShare1 = await window.resumeManager.getAutoShareSetting();
-            if (shouldAutoShare1) {
-              console.log('执行自动转发至邮箱');
-              const shareOk = await window.resumeManager.generateShareLink(document);
-              if (shareOk) console.log('转发结果:', shareOk.shareLink ? '成功' : '卡片已截取');
-            }
+            // ★ 自动转发至邮箱 已在评估函数内部完成，此处不重复调用
           }
 
           // 保存已分析的简历ID
@@ -3673,29 +3882,30 @@ async function handleChatPageAnalysis(button) {
 
         } catch (error) {
           console.error('AI评估失败:', error);
-          // 确保关闭简历弹窗，即使评估失败
-          await window.resumeManager.closeResume();
-          await closeAllResumeDialogs(document);
+          await forceCloseResumeDialog([document], 5);
+          // 次数用完 → 直接停止，不在循环里反复开关弹窗
+          if ((error.message || '').includes('次数已用完')) {
+            showPanelMsg('次数已用完');
+            isAnalyzing = false; return;
+          }
           continue;
         }
 
-        // 等待5秒后关闭简历弹窗
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        if (!isAnalyzing) return;
-
-        await window.resumeManager.closeResume();
+        // 沟通页处理完立刻强力关弹窗（验证真的关掉），避免堆叠
+        await forceCloseResumeDialog([document], 5);
         console.log('已关闭简历弹窗');
         if (!isAnalyzing) return;
+        await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 300));
 
         // 等待处理下一份简历
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 2500 + Math.random() * 2000));
 
       } catch (error) {
         console.error(`处理简历 ${resumeId} 时出错:`, error);
         allCurrentItemsProcessed = false;
         if (isAnalyzing) {
-          await window.resumeManager.closeResume();
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await forceCloseResumeDialog([document], 5);
+          await new Promise(resolve => setTimeout(resolve, 3000 + Math.random() * 2000));
         }
         if (!isAnalyzing) return;
       }
@@ -3704,23 +3914,24 @@ async function handleChatPageAnalysis(button) {
     // 清除超时检查
     if (dialogTimeoutCheck) clearTimeout(dialogTimeoutCheck);
 
-    // 只有当当前所有简历都处理完成后，才进行下一次滚动
+    // 处理完当前视口后滚动加载更多（除非出错中断）
     if (allCurrentItemsProcessed) {
-      console.log(`当前页面所有简历已处理完成（共${processedIds.size}份），准备滚动加载更多...`);
-      await autoScroll(document.querySelector("div.user-container > div"));
+      console.log(`当前视口已处理完成（累计${processedIds.size}份），滚动加载更多...`);
+      var scrollContainer = document.querySelector('.user-list.b-scroll-stable') || document.querySelector('.chat-user .user-container') || document.querySelector('.user-container');
+      await autoScroll(scrollContainer);
 
       // 等待新内容加载
-      await new Promise(resolve => setTimeout(resolve, 3000)); // 延长等待时间
+      await new Promise(resolve => setTimeout(resolve, 3000));
 
       // 检查是否有新的简历加载
-      const newItems = document.querySelectorAll("#container > div:nth-child(1) > div > div.chat-box > div.chat-container > div.chat-user > div.user-container > div > div:nth-child(2) > div");
-      if (newItems.length === userItems.length && !newResumeFound) {
+      const newItems = document.querySelectorAll('.user-list .geek-item, .user-list.b-scroll-stable .geek-item');
+      if (newItems.length === allUserItems.length && !newResumeFound) {
         console.log('没有新的简历加载，可能已到达底部');
-        // 再尝试滚动一次，确认是否真的到底了
-        await autoScroll(document.querySelector("div.user-container"));
+        // 再尝试滚动一次确认
+        await autoScroll(scrollContainer);
         await new Promise(resolve => setTimeout(resolve, 3000));
 
-        const finalCheck = document.querySelectorAll("#container > div:nth-child(1) > div > div.chat-box > div.chat-container > div.chat-user > div.user-container > div > div:nth-child(2) > div");
+        const finalCheck = document.querySelectorAll('.user-list .geek-item, .user-list.b-scroll-stable .geek-item');
         if (finalCheck.length === newItems.length) {
           console.log('确认已到达底部，结束分析');
           break;
@@ -3745,8 +3956,103 @@ async function handleChatPageAnalysis(button) {
   console.log(`聊天页面简历分析完成，本次共处理 ${processedIds.size} 份简历`);
 }
 
-// ==================== 沟通页自动求简历/下载附件 ====================
+async function closeAllShareBoxes() {
+  try {
+    var _docs = [document];
+    (function _coll(root, depth) {
+      if (!root || !root.querySelectorAll || depth > 4) return;
+      try { var _ifs = root.querySelectorAll("iframe"); for (var _i = 0; _i < _ifs.length; _i++) { try { var _fd = _ifs[_i].contentDocument; if (_fd && _docs.indexOf(_fd)===-1) { _docs.push(_fd); _coll(_fd,depth+1); } } catch(e) {} } } catch(e) {}
+    })(document, 0);
+    for (var _d = 0; _d < _docs.length; _d++) {
+      var _dd = _docs[_d]; if (!_dd || !_dd.querySelectorAll) continue;
+      var _btns = _dd.querySelectorAll(".c-share-box .iboss-close, .c-share-box .boss-popup__close, .c-share-box .close, .c-share-box .icon-close");
+      for (var _i2 = 0; _i2 < _btns.length; _i2++) { if (_btns[_i2].offsetParent!==null) _btns[_i2].click(); }
+      var _bxs = _dd.querySelectorAll(".c-share-box");
+      for (var _j = 0; _j < _bxs.length; _j++) { try { _bxs[_j].parentNode && _bxs[_j].parentNode.removeChild(_bxs[_j]); } catch(e) {} }
+    }
+  } catch(e) {}
+}
+
+// ==================== 通信页自动求简历/下载附件 ====================
 // 独立功能：遍历未读对话 → 附件简历可下则下载，否则求简历可点则点击
+// ==================== 下载简历附件 ====================
+async function handleChatResumeDownload() {
+  console.log('[下载] 开始');
+  var dls = 0, skips = 0;
+  var setS = function(t) { showPanelMsg(t); };
+  var sleep = function(ms) { return new Promise(function(r) { setTimeout(r, ms); }); };
+  var processed = new Set();
+  try { await waitForElement('.geek-item[data-id]', 8000); } catch(e) { setS('未找到聊天列表'); return; }
+  var prevCnt = 0, sameCnt = 0;
+  while (isAnalyzing) {
+    var items = document.querySelectorAll('.geek-item[data-id]');
+    if (items.length === prevCnt) { if (++sameCnt >= 3) break; } else { prevCnt = items.length; sameCnt = 0; }
+    for (var i = 0; i < items.length; i++) {
+      if (!isAnalyzing) return;
+      var it = items[i], did = it.getAttribute('data-id');
+      if (!did || processed.has(did)) continue;
+      processed.add(did);
+      var nm = (it.querySelector('.geek-name')?.textContent||'').trim()||did;
+      try {
+        it.click(); await sleep(1200);
+        try { await waitForElement('.resume-btn-content', 5000); } catch(e) {}
+        await sleep(500);
+        var fb = document.querySelector('.resume-btn-file');
+        if (!fb || fb.classList.contains('disabled')) { skips++; setS('跳过'+nm+' | 下'+dls+' 跳'+skips); continue; }
+        fb.click(); await sleep(3000);
+        var url = '';
+        for (var t = 0; t < 10 && !url; t++) {
+          var box = document.querySelector('.resume-recommend,.attachment-view,.dialog-wrap,[class*=dialog]');
+          if (box) {
+            var fr = box.querySelector('iframe.attachment-iframe,iframe[src*=bzl],iframe[src*=pdf-viewer]');
+            if (fr) {
+              url = fr.getAttribute('src')||'';
+              var m = url.match(/[?&]url=([^&]+)/);
+              if (m) url = decodeURIComponent(m[1]);
+              if (url && url.indexOf('http')!==0) url = (url.indexOf('//')===0?'https:':'')+url;
+            }
+          }
+          await sleep(500);
+        }
+        if (url) {
+          var dlR = null;
+          var onDl = function(m) { if (m.action==='downloadComplete') dlR = m; };
+          chrome.runtime.onMessage.addListener(onDl);
+          chrome.runtime.sendMessage({action:'startDownload',url:url});
+          var cloudUrl = '';
+          if (!('$$IS_PAID$$' === 'true')) {
+            try {
+              var b = await fetch(url).then(function(r){ return r.blob(); });
+              var fd = new FormData(); fd.append('file', b, nm+'.pdf');
+              var up = await fetch('http://192.168.5.235:8088/anonymous/upload', {method:'POST', body:fd});
+              var upJson = await up.json();
+              cloudUrl = upJson.data || upJson.url || '';
+              if (cloudUrl && cloudUrl.indexOf('http')!==0) cloudUrl = 'http://192.168.5.235:8088'+(cloudUrl.indexOf('/')===0?'':'/')+cloudUrl;
+            } catch(e) { console.warn('[下载] 上传云失败:', e.message); }
+          }
+          for (var w = 0; w < 30 && !dlR; w++) await sleep(500);
+          chrome.runtime.onMessage.removeListener(onDl);
+          dls++;
+          var fn = dlR ? dlR.fileName : 'resume.pdf';
+          if (fn || cloudUrl) {
+            var recs = (await new Promise(function(r){ chrome.storage.local.get('dl_records', r); })).dl_records || [];
+            recs.unshift({name: nm, file: fn, cloud: cloudUrl, time: new Date().toISOString()});
+            if (recs.length > 200) recs.length = 200;
+            await new Promise(function(r){ chrome.storage.local.set({dl_records: recs}, r); });
+          }
+          setS('下载: '+(fn||'?')+(cloudUrl?' ☁已上传':'')+' | 下'+dls+' 跳'+skips);
+        } else { skips++; setS('跳过'+nm+'(无URL) | 下'+dls+' 跳'+skips); }
+        var cb = document.querySelector('.resume-recommend .close-btn,.attachment-view .close-btn,.close-btn');
+        if (cb) { cb.click(); await sleep(500); }
+      } catch(e) { console.warn('[下载]', nm, e.message); }
+      await sleep(2000 + Math.random() * 2000);
+    }
+    var sc = document.querySelector('.user-list.b-scroll-stable,.chat-user .user-container');
+    if (sc) { sc.scrollTop = sc.scrollHeight; await sleep(2500); }
+  }
+  setS('下载完成 | 下'+dls+' 跳'+skips);
+}
+
 async function handleChatResumeCollection() {
   console.log('[求简历] 开始沟通页采集');
   var status = document.getElementById('collectStatus');
@@ -3811,21 +4117,7 @@ async function handleChatResumeCollection() {
         try { await waitForElement('.resume-btn-content, .operate-exchange-left, .chat-conversation', 5000); } catch(e) {}
         await sleep(400);
 
-        // 判断附件简历：可点 = <a class="resume-btn-file"> 且无 disabled
-        var fileBtn = _pickActive('.resume-btn-file');
-        var fileAvail = fileBtn && fileBtn.tagName === 'A' && !fileBtn.classList.contains('disabled');
-
-        if (fileAvail) {
-          fileBtn.click();
-          await sleep(1200);
-          downloaded++;
-          incDailyShare();
-          setStatus('下载'+name+' | 已下载'+downloaded+' 求'+requested+' 跳'+skipped);
-          console.log('[求简历] 下载附件:', name);
-          continue;
-        }
-
-        // 附件灰 → 判断求简历：.operate-btn 文字含"求简历" 且无 disabled
+        // ★ 求简历：不下载附件，直接请求：.operate-btn 文字含"求简历" 且无 disabled
         var reqBtn = Array.from(document.querySelectorAll('.operate-btn')).filter(function(b){
           return (b.textContent||'').indexOf('求简历') >= 0 && b.offsetParent !== null;
         });
@@ -3836,11 +4128,14 @@ async function handleChatResumeCollection() {
         if (reqAvail) {
           reqActive.click();
           await sleep(800);
-          // 确认弹窗："确定向牛人索取简历吗？" → 找确认按钮
+          // ★ 确认弹窗：搜 chat-tooltip / exchange-tooltip / popover / dialog 等多种容器
           var confirmed = false;
-          var boxes = Array.from(document.querySelectorAll('.exchange-tooltip, [class*="tooltip"], [class*="confirm"], [class*="popup"]'));
+          var querySel = '.chat-tooltip-custom, .exchange-tooltip, .operate-exchange-right, .operate-exchange-left, .dialog-container, [class*="popover"], [class*="popup"]';
+          var boxes = Array.from(document.querySelectorAll(querySel));
           for (var b = 0; b < boxes.length; b++) {
-            if (!/确定向牛人索取简历|索取简历|确认/.test(boxes[b].textContent || '')) continue;
+            var text = boxes[b].textContent || '';
+            if (text.length > 200) continue;
+            if (!/确定|确认|索取简历/.test(text)) continue;
             // 在这个框里找"确定/确认"按钮
             var okBtn = Array.from(boxes[b].querySelectorAll('button, span, a, div')).find(function(x){
               var t=(x.textContent||'').trim(); return (t==='确定'||t==='确认'||t==='是') && x.offsetParent!==null && !x.querySelector('*');
@@ -4257,9 +4552,9 @@ async function handleRecommendPageAnalysis(button) {
   await waitForAnyCardList(iframeDoc);
   console.log('简历列表已加载');
 
-  // 初始清理所有可能存在的弹窗
-  await closeAllResumeDialogs(document);
-  await closeAllResumeDialogs(iframeDoc);
+  // 初始清理所有可能存在的弹窗 + 分享弹窗
+  await closeAllShareBoxes();
+  await forceCloseResumeDialog([document, iframeDoc], 5);
 
   // 记录已处理的简历ID，避免重复处理
   const processedIds = new Set();
@@ -4317,6 +4612,21 @@ async function handleRecommendPageAnalysis(button) {
 
     // 后续可以根据cardSource值判断处理流程
     console.log('简历卡片来源:', cardSource);
+
+    // ★ 过滤已读简历（推荐牛人页面也生效）
+    //    推荐页已读标记是 has-viewed（不是 has-read），沟通页是 has-read
+    var filterRead = await new Promise(function(r) { chrome.storage.sync.get(['filterRead'], function(res) { r(res.filterRead !== undefined ? res.filterRead : true); }); });
+    if (filterRead) {
+      resumeCards = resumeCards.filter(function(card) {
+        if (card.classList.contains('has-read') || card.classList.contains('has-viewed')) return false;
+        if (card.querySelector('.has-read, .has-viewed')) return false;
+        if (card.querySelector('[style*="grayscale"]')) return false;
+        var inner = card.querySelector('.card-inner') || card.querySelector('.new-geek-wrap');
+        if (inner && (inner.classList.contains('has-read') || inner.classList.contains('has-viewed'))) return false;
+        return true;
+      });
+      console.log('过滤已读后剩余:', resumeCards.length, '(过滤已读: 是)');
+    }
 
     // 检测是否连续多次获取到相同数量的卡片但未处理新简历
     if (resumeCards.length === previousCardCount) {
@@ -4411,9 +4721,8 @@ async function handleRecommendPageAnalysis(button) {
         newResumeFound = true;
         allCurrentCardsProcessed = false;
 
-        // 在打开新简历前，先尝试关闭所有可能存在的简历弹窗
-        await closeAllResumeDialogs(document);
-        await closeAllResumeDialogs(iframeDoc);
+        // 在打开新简历前，先强力关闭所有可能残留的简历弹窗（验证真的关掉）
+        await window.resumeManager.forceCloseResumeDialog([document, iframeDoc], 5);
         await closeInterferingPopups(document);
         await closeInterferingPopups(iframeDoc);
 
@@ -4502,11 +4811,14 @@ async function handleRecommendPageAnalysis(button) {
 
         // 调用AI评估
         try {
+          // ★ 评估前检查试用次数
+          var trialRem4 = await checkTrialRemaining();
+          if (trialRem4 <= 0) { showPanelMsg('次数已用完'); isAnalyzing = false; return; }
           console.log('开始AI评估');
           // 使用 iframe 文档作为评估上下文，避免将 iframe 元素本身传入
           const score = await window.resumeManager.evaluateResume(resumeContent, iframeDoc);
           console.log('评估完成，分数:', score);
-          incDailyBrowse();
+          incDailyBrowse(); window.consumeTrial && window.consumeTrial();
           if (!isAnalyzing) return;
 
           // 如果分数达标，根据设置决定是否自动收藏和联系Ta
@@ -4538,14 +4850,7 @@ async function handleRecommendPageAnalysis(button) {
               }
             }
 
-            // 检查是否需要自动转发至邮箱
-            const shouldAutoShare2 = await window.resumeManager.getAutoShareSetting();
-            if (shouldAutoShare2) {
-              console.log('执行自动转发至邮箱');
-              const shareOk = await window.resumeManager.generateShareLink(document);
-              if (shareOk) console.log('转发结果:', shareOk.shareLink ? '成功' : '卡片已截取');
-            }
-
+            // ★ 自动转发至邮箱 已在评估函数内部通过 generateShareLink 完成，此处不重复调用
           }
 
           // 保存已分析的简历ID到 storage
@@ -4572,22 +4877,23 @@ async function handleRecommendPageAnalysis(button) {
           continue;
         }
 
-        // 等待5秒后关闭简历弹窗
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        // 等待2秒后关闭简历弹窗
+        await new Promise(resolve => setTimeout(resolve, 2000));
         if (!isAnalyzing) return;
 
-        await window.resumeManager.closeResume(iframeDoc);
+        // ★ 强力关闭并验证：必须真的关掉当前 frame 弹窗，才能打开下一个
+        await window.resumeManager.forceCloseResumeDialog([document, iframeDoc], 5);
         console.log('已关闭简历弹窗');
         if (!isAnalyzing) return;
 
-        // 等待处理下一份简历 - 增加等待时间确保页面清理完成
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        // 等待处理下一份简历
+        await new Promise(resolve => setTimeout(resolve, 2500 + Math.random() * 2000));
       } catch (error) {
         console.error(`处理简历 ${resumeId} 时出错:`, error);
         allCurrentCardsProcessed = false;
         if (isAnalyzing) {
           await window.resumeManager.closeResume();
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, 3000 + Math.random() * 2000));
         }
         if (!isAnalyzing) return;
       }
@@ -4899,8 +5205,8 @@ async function extractRecommendPageResumeContent(doc, resumeId) {
       console.warn('简历详情可能尚未完全渲染，继续尝试提取（可能回退到DOM空结果）');
     }
 
-    // 推荐页内容提取统一走 DOM，评估阶段统一走截图 OCR
-    console.log('推荐页详情提取使用 DOM（评估阶段将使用截图 OCR）');
+    // 推荐页内容提取统一走 DOM，评估阶段统一走截图 AI识别
+    console.log('推荐页详情提取使用 DOM（评估阶段将使用截图 AI识别）');
 
     // 提取基本信息
     let baseInfo = {};
@@ -5085,7 +5391,7 @@ async function extractRecommendPageResumeContent(doc, resumeId) {
       timestamp: new Date().toISOString()
     };
 
-    // DOM 回退内容过空时，标记为提取异常，强制后续评估流程直接走视觉识别（截图+OCR）
+    // DOM 回退内容过空时，标记为提取异常，强制后续评估流程直接走视觉识别（截图+AI识别）
     const hasStructuredData =
       !!content.name ||
       !!content.expectInfo?.position ||
@@ -5163,51 +5469,106 @@ async function extractSearchPageResumeContentCommon(doc) {
   return resumeDetail;
 }
 
-// 添加一个尝试关闭所有可能开着的简历弹窗的函数
+// 关闭所有弹窗（递归搜主文档+所有子iframe，推荐页弹窗在深层iframe内）
 async function closeAllResumeDialogs(doc = document) {
-  console.log('尝试关闭所有可能存在的简历弹窗');
-  try {
-    // 查找所有可能的简历弹窗关闭按钮
-    const closeButtons = doc.querySelectorAll(
-      '.boss-dialog__wrapper.dialog-lib-resume .dialog-close, ' +
-      '.boss-dialog__wrapper.resume-common-dialog.search-resume.new-chat-resume-dialog-main-ui.resume-container > div.boss-popup__close, ' +
-      '.boss-dialog__wrapper .dialog-close, ' +
-      'div.boss-popup__close'
-    );
-
-    if (closeButtons.length > 0) {
-      console.log(`找到${closeButtons.length}个简历弹窗，尝试关闭`);
-      // 依次点击所有关闭按钮
-      for (const button of closeButtons) {
-        button.click();
-        await new Promise(resolve => setTimeout(resolve, 300)); // 短暂等待确保DOM响应
+  console.log('关闭所有简历弹窗...');
+  // 收集所有文档（主文档 + 传入doc + 各自的子iframe，递归5层）
+  var allDocs = [document];
+  if (doc && doc !== document) allDocs.push(doc);
+  function collectDocs(root, depth) {
+    if (!root || !root.querySelectorAll || depth > 5) return;
+    try {
+      var ifs = root.querySelectorAll('iframe');
+      for (var i = 0; i < ifs.length; i++) {
+        try {
+          var fd = ifs[i].contentDocument;
+          if (fd && allDocs.indexOf(fd) === -1) { allDocs.push(fd); collectDocs(fd, depth + 1); }
+        } catch(e) {}
       }
-
-      // 等待确保弹窗真的关闭了
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // 再次检查是否还有弹窗存在
-      const remainingDialogs = doc.querySelectorAll(
-        '.boss-dialog__wrapper.dialog-lib-resume, ' +
-        '.boss-dialog__wrapper.resume-common-dialog.search-resume, ' +
-        '.boss-dialog__wrapper'
-      );
-
-      if (remainingDialogs.length > 0) {
-        console.log(`仍有${remainingDialogs.length}个弹窗未关闭，再次尝试`);
-        // 再次尝试关闭
-        for (const dialog of remainingDialogs) {
-          const closeBtn = dialog.querySelector('.dialog-close, .boss-popup__close');
-          if (closeBtn) closeBtn.click();
-        }
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    } else {
-      console.log('未发现打开的简历弹窗');
-    }
-  } catch (error) {
-    console.error('关闭简历弹窗时发生错误:', error);
+    } catch(e) {}
   }
+  collectDocs(document, 0);
+  if (doc && doc !== document) collectDocs(doc, 0);
+
+  var closed = 0;
+  for (var d = 0; d < allDocs.length; d++) {
+    var dd = allDocs[d];
+    if (!dd || !dd.querySelectorAll) continue;
+    var btns = dd.querySelectorAll(
+      '.boss-dialog__wrapper.dialog-lib-resume .dialog-close, ' +
+      '.boss-dialog__wrapper .dialog-close, ' +
+      '.boss-dialog__wrapper .boss-popup__close, ' +
+      '.boss-popup__close, ' +
+      '.boss-popup__wrapper .iboss-close, ' +
+      '.boss-popup__wrapper .close, ' +
+      '.new-resume-online-main-ui .close-btn, ' +
+      '.resume-common-wrap .close'
+    );
+    for (var b = 0; b < btns.length; b++) {
+      if (btns[b].offsetParent) { btns[b].click(); closed++; }
+    }
+  }
+  if (closed > 0) {
+    await new Promise(function(r) { setTimeout(r, 600); });
+    console.log('已关闭 ' + closed + ' 个弹窗');
+  }
+}
+
+// ★ 强力关闭简历弹窗并验证真的关掉了
+//   （只关真正的简历弹窗容器内的 close 按钮，不碰推荐列表卡片的 .iboss-close）
+async function forceCloseResumeDialog(docs, maxRounds) {
+  maxRounds = maxRounds || 5;
+  // 收集所有相关文档（含子 iframe）
+  var allDocs = [];
+  function collect(root, depth) {
+    if (!root || !root.querySelectorAll || depth > 5 || allDocs.indexOf(root) !== -1) return;
+    allDocs.push(root);
+    try {
+      var ifs = root.querySelectorAll('iframe');
+      for (var i = 0; i < ifs.length; i++) {
+        try { var fd = ifs[i].contentDocument; if (fd) collect(fd, depth + 1); } catch(e) {}
+      }
+    } catch(e) {}
+  }
+  var seedList = Array.isArray(docs) ? docs : [docs || document];
+  seedList.push(document);
+  for (var s = 0; s < seedList.length; s++) collect(seedList[s], 0);
+
+  // 找包含简历内容的弹窗容器
+  function getResumeDialogs(dd) {
+    if (!dd || !dd.querySelectorAll) return [];
+    var all = dd.querySelectorAll('.boss-dialog__wrapper.dialog-lib-resume, .resume-common-dialog, .boss-dialog__wrapper, .boss-popup__wrapper');
+    return Array.from(all).filter(function(el) {
+      return el.querySelector && el.querySelector('.resume-detail-wrap, .resume-center-side, iframe[src*="c-resume"]');
+    });
+  }
+
+  for (var round = 0; round < maxRounds; round++) {
+    var anyOpen = false;
+    for (var d = 0; d < allDocs.length; d++) {
+      var dd = allDocs[d];
+      var dlgs = getResumeDialogs(dd);
+      if (dlgs.length === 0) continue;
+      anyOpen = true;
+      for (var j = 0; j < dlgs.length; j++) {
+        // 只点弹窗容器内部的关闭按钮（限定在 container 范围内搜索，避免误杀推荐卡片的 .iboss-close）
+        var container = dlgs[j];
+        var btn = container.querySelector('.dialog-close, .boss-popup__close, .boss-popup__wrapper .iboss-close, .boss-popup__wrapper .close, .iboss-close, .new-resume-online-main-ui .close-btn, .resume-common-wrap .close');
+        if (btn && btn.offsetParent !== null) { try { btn.click(); } catch(e) {} }
+        // ESC 兜底
+        try { container.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true })); } catch(e) {}
+      }
+    }
+    if (!anyOpen) { console.log('✓ 无简历弹窗'); return true; }
+    await new Promise(function(r) { setTimeout(r, 500); });
+  }
+  // 最后一轮后检查
+  for (var dd2 = 0; dd2 < allDocs.length; dd2++) {
+    if (getResumeDialogs(allDocs[dd2]).length > 0) {
+      console.log('⚠️ 弹窗仍未完全关闭'); return false;
+    }
+  }
+  return true;
 }
 
 function isElementVisible(el) {
@@ -5216,6 +5577,28 @@ function isElementVisible(el) {
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
   const rect = el.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
+}
+
+// ★ 从已打开的简历弹窗 iframe URL 提取 geek ID（全局唯一人员 ID）
+function getOpenedGeekId(doc) {
+  try {
+    var d = doc || document;
+    var iframe = Array.from(d.querySelectorAll('iframe[src*="/web/frame/c-resume/"]')).find(function(f) { return isElementVisible(f); });
+    if (!iframe) {
+      try {
+        var allIfs = d.querySelectorAll("iframe");
+        for (var i = 0; i < allIfs.length; i++) {
+          try { var fd = allIfs[i].contentDocument; if (fd) { iframe = Array.from(fd.querySelectorAll('iframe[src*="/web/frame/c-resume/"]')).find(function(f) { return isElementVisible(f); }); if (iframe) break; } } catch(e) {}
+        }
+      } catch(e) {}
+    }
+    if (iframe) {
+      var src = iframe.getAttribute("src") || "";
+      var m = src.match(/[?&]geekId=([^&]+)/) || src.match(/[?&]geekid=([^&]+)/i);
+      if (m && m[1]) return decodeURIComponent(m[1]);
+    }
+  } catch(e) {}
+  return "";
 }
 
 function getOpenedResumeId(doc = document) {
@@ -5251,9 +5634,10 @@ function isResumeDialogReady(doc = document, targetResumeId = '') {
     // 检查内容容器是否有实际内容（DOM渲染的简历会有内容，Canvas渲染的简历innerText很短）
     const hasResumeContent = !!(resumeWrap && isElementVisible(resumeWrap) && (resumeWrap.innerText || '').trim().length > 20);
 
-    // 3. 查找简历弹窗对话框
+    // 3. 查找简历弹窗对话框（含沟通页 .new-chat-resume-dialog / .resume-container，推荐页 .resume-detail-wrap）
     const resumeDialog = doc.querySelector(
-      '.boss-dialog__wrapper.dialog-lib-resume, .boss-dialog__wrapper.resume-common-dialog.search-resume, .dialog-lib-resume'
+      '.boss-dialog__wrapper.dialog-lib-resume, .boss-dialog__wrapper.resume-common-dialog.search-resume, .dialog-lib-resume, ' +
+      '.new-chat-resume-dialog-main-ui, .resume-common-dialog, .resume-detail-chat, .resume-detail-wrap, .boss-popup__wrapper.boss-dialog'
     );
     const hasResumeDialog = !!(resumeDialog && isElementVisible(resumeDialog));
 
@@ -6129,7 +6513,7 @@ async function extractNewRecommendPageResumeContent(doc, resumeId) {
   }
 }
 
-// 已废弃：统一采用截图 OCR，不再执行 Canvas 文本提取链路
+// 已废弃：统一采用截图 AI识别，不再执行 Canvas 文本提取链路
 async function extractResumeCanvas() {
   return '';
 }
@@ -6187,7 +6571,7 @@ async function captureAndCropResume(iframeRect, resumeRect) {
  * 支持发送多张截图以覆盖完整简历内容
  */
 async function performVisionExtraction(doc, resumeId, apiMode, customApiConfig = null) {
-  console.log('[Vision] 使用 PaddleOCR 识别');
+  console.log('[Vision] 使用 AI识别 识别');
   try {
     const imageList = await captureFullResumeScreenshot(doc);
     if (!imageList || imageList.length === 0) throw new Error('无法生成简历截图');
@@ -6258,15 +6642,28 @@ async function captureFullResumeScreenshot(doc) {
   }
 
   // 支持多层 iframe 的滚动容器查找（限制递归深度防止极端嵌套）
+  // 优先搜传入的 doc（推荐/沟通页传的是 iframeDoc）+ 主文档的 iframe 递归
   function findScrollContainer(rootDoc, depth = 0) {
     if (!rootDoc || depth > 3) return null;
+    // 首次调用时也搜 doc（传入的文档）+ 主文档的 iframe
+    if (depth === 0) {
+      // 先搜当前 doc 内部
+      var found = findScrollContainer(doc, 4);
+      if (found) return found;
+      // 再搜主文档内部（覆盖搜索页弹窗）
+      found = findScrollContainer(document, 4);
+      if (found) return found;
+    }
 
     const selectors = [
       '.resume-detail-wrap',
+      '.resume-detail-chat',
+      '.resume-common-wrap',
       '.resume-center-side',
       '.resume-detail-main',
       '.resume-content',
-      '.resume-detail-content'
+      '.resume-detail-content',
+      '.iframe-resume-detail'
     ];
 
     for (const selector of selectors) {
@@ -6320,14 +6717,18 @@ async function captureFullResumeScreenshot(doc) {
     return z;
   }
   function pickActive(selector, root) {
-    const els = Array.from((root || document).querySelectorAll(selector))
+    var searchRoot = root || doc || document;
+    const els = Array.from(searchRoot.querySelectorAll(selector))
       .filter(el => { const r = el.getBoundingClientRect(); return r.width > 50 && r.height > 50; });
     if (!els.length) return null;
     els.sort((a, b) => stackZ(a) - stackZ(b)); // z-index 升序，最后一个=最上层
     return els[els.length - 1];
   }
 
-  const activeDialog = pickActive('.dialog-lib-resume') || pickActive('.lib-standard-resume') || document;
+  const activeDialog = pickActive('.dialog-lib-resume')
+    || pickActive('.lib-standard-resume')
+    || pickActive('.resume-common-wrap')
+    || doc || document;
   const sc = pickActive('.resume-detail-wrap', activeDialog)
     || activeDialog.querySelector('.resume-detail-wrap')
     || scrollContainer;
@@ -6368,7 +6769,7 @@ async function captureFullResumeScreenshot(doc) {
   }
   await sleep(400); // 再等 Vue/canvas 首屏渲染完成
 
-  // 隐藏干扰浮层（"近14天你首次看到该牛人"提示条等 DOM 浮层），避免遮挡简历被 OCR 误读；finally 还原
+  // 隐藏干扰浮层（"近14天你首次看到该牛人"提示条等 DOM 浮层），避免遮挡简历被 AI识别 误读；finally 还原
   const hiddenBanners = [];
   try {
     const scope = (activeDialog && activeDialog.querySelectorAll) ? activeDialog : document;
@@ -6418,15 +6819,49 @@ async function captureFullResumeScreenshot(doc) {
   // 指纹：取裁剪图中段一小段，判断内容是否变化（识别到底/没滚动）
   function fingerprint(u) { const h = u.length >> 1; return u.slice(h, h + 160); }
 
-  // ★ 每次截图前重新计算裁剪区（堆叠弹窗+滚动时 iframe 位置会变）
+  // ★ 每次截图前重新计算裁剪区——裁剪到 resume-center-side（只含简历内容，过滤右侧栏）
   async function shotFixed() {
-    // 重新确认当前激活弹窗的 iframe（可能因 Boss 关闭/重建弹窗而变化）
-    var curActive = pickActive('.dialog-lib-resume') || pickActive('.lib-standard-resume') || activeDialog;
-    var curIframe = null;
-    if (curActive) curIframe = curActive.querySelector('.resume-detail-wrap iframe') || curActive.querySelector('iframe');
-    if (!curIframe) curIframe = iframe; // 兜底用初始值
-    var r = curIframe.getBoundingClientRect();
-    if (r.width < 50 || r.height < 50) return null; // iframe 不可见
+    // 在传入的 doc + 主文档中搜 resume-center-side（推荐页在子 iframe 内）
+    var docRoots = [doc, document];
+    var curActive = null;
+    for (var di = 0; di < docRoots.length; di++) {
+      var d2 = docRoots[di];
+      if (!d2 || !d2.querySelector) continue;
+      curActive = d2.querySelector('.resume-center-side');
+      if (curActive) break;
+      // 递归搜子 iframe
+      try {
+        var ifs2 = d2.querySelectorAll('iframe');
+        for (var fj = 0; fj < ifs2.length; fj++) {
+          try {
+            var fd3 = ifs2[fj].contentDocument;
+            if (fd3) { curActive = fd3.querySelector('.resume-center-side'); if (curActive) break; }
+          } catch(e) {}
+        }
+      } catch(e) {}
+      if (curActive) break;
+    }
+    // 兜底：用初始 iframe
+    if (!curActive) curActive = iframe;
+    // ★ 累加所有祖先 iframe 偏移 → 换算为顶层窗口绝对坐标
+    //   (.resume-center-side 在子 iframe 内，其 rect 是子 iframe 视口坐标，
+    //    captureVisibleTab 截的是顶层窗口，必须对齐坐标系，否则裁剪框会左上偏移)
+    var r = (function(el) {
+      var rc = el.getBoundingClientRect();
+      var left = rc.left, top = rc.top, w = rc.width, h = rc.height;
+      try {
+        var win = el.ownerDocument && el.ownerDocument.defaultView;
+        var guard = 0;
+        while (win && win.frameElement && guard < 6) {
+          var fr = win.frameElement.getBoundingClientRect();
+          left += fr.left; top += fr.top;
+          if (win === win.parent) break;
+          win = win.parent; guard++;
+        }
+      } catch(e) {}
+      return { left: left, top: top, width: w, height: h, right: left + w, bottom: top + h };
+    })(curActive);
+    if (r.width < 50 || r.height < 50) return null; // 区域不可见
     var ct = Math.max(0, Math.floor(r.top));
     var ch = Math.max(0, Math.min(winH, Math.floor(r.bottom)) - ct);
     if (ch < 30) return null;
@@ -6487,7 +6922,7 @@ async function captureFullResumeScreenshot(doc) {
 
     if (slices.length === 0) return [];
     if (slices.length === 1) {
-      // 单屏：原图即 OCR 图，简单缩一下作为展示图
+      // 单屏：原图即 AI识别 图，简单缩一下作为展示图
       var singleUrl = slices[0].dataUrl;
       var singleDisp = await compressForDisplay(singleUrl);
       return [{ ocrPng: singleUrl, displayImage: singleDisp || singleUrl }];
@@ -6496,7 +6931,9 @@ async function captureFullResumeScreenshot(doc) {
     const merged = await stitchSlices(slices, _cropW, resumeHeight, dpr);
     console.log('[Vision] 拼接' + slices.length + '张为1张长图');
     DEBUG && showPanelMsg('拼接完成 ' + slices.length + '屏→1张长图');
-    return merged ? [merged] : slices.map(s => ({ ocrPng: s.dataUrl, displayImage: s.dataUrl }));
+    var _finalResults = merged ? [merged] : slices.map(s => ({ ocrPng: s.dataUrl, displayImage: s.dataUrl }));
+    for (var _fi = 0; _fi < _finalResults.length; _fi++) { _finalResults[_fi].ocrPng = await removeAvatarFromImage(_finalResults[_fi].ocrPng); }
+    return _finalResults;
   } catch (e) {
     console.error('[Vision] 滚动截图失败:', e);
     const fp = await captureVisibleTab();
@@ -6517,6 +6954,20 @@ async function captureFullResumeScreenshot(doc) {
 }
 
 // 按内容坐标把切片拼成一张无缝长图（物理像素，重叠区自动覆盖对齐）
+async function removeAvatarFromImage(dataUrl) {
+  if (!dataUrl) return dataUrl;
+  try {
+    var _avtImg = new Image();
+    await new Promise(function(r) { _avtImg.onload=r; _avtImg.src=dataUrl; });
+    var _avtC = document.createElement("canvas"); _avtC.width = _avtImg.width; _avtC.height = _avtImg.height;
+    var _avtCx = _avtC.getContext("2d");
+    _avtCx.drawImage(_avtImg, 0, 0);
+    _avtCx.fillStyle = "#ffffff";
+    _avtCx.fillRect(0, 0, Math.min(100, _avtImg.width), Math.min(100, _avtImg.height));
+    return _avtC.toDataURL("image/png");
+  } catch(e) { return dataUrl; }
+}
+
 async function stitchSlices(slices, cropWcss, resumeHeightCss, dpr) {
   try {
     const loaded = await Promise.all(slices.map(s => new Promise(res => {
@@ -6540,7 +6991,7 @@ async function stitchSlices(slices, cropWcss, resumeHeightCss, dpr) {
       const drawH = Math.min(im.height, avail);  // 裁掉超出简历真实高度的黑边
       ctx.drawImage(im, 0, 0, im.width, drawH, 0, y, im.width, drawH);
     });
-    // OCR 用无损 PNG；展示用压缩小 JPEG（避免大图在 IndexedDB/HTML 显示失败）
+    // AI识别 用无损 PNG；展示用压缩小 JPEG（避免大图在 IndexedDB/HTML 显示失败）
     var ocrPng = canvas.toDataURL('image/png');
     var displayW = Math.min(canvas.width, 900);
     var displayScale = displayW / canvas.width;
@@ -6596,7 +7047,7 @@ async function captureAndCropRect(el) {
   } catch(e) { console.warn('[Vision] 裁剪失败:', e.message); return null; }
 }
 
-// ★ 智能分片 OCR：图片 >2000px 高度时，在空白行处切开逐片识别，避免 PaddleOCR 降采样
+// ★ 智能分片 AI识别：图片 >2000px 高度时，在空白行处切开逐片识别，避免 AI识别 降采样
 async function smartSplitOcr(b64, maxH) {
   maxH = maxH || 2000;
   return new Promise((resolve, reject) => {
@@ -6605,7 +7056,7 @@ async function smartSplitOcr(b64, maxH) {
       try {
         var w = img.width, h = img.height;
         if (h <= maxH) {
-          // 高度合适，直接 OCR
+          // 高度合适，直接 AI识别
           var txt = await ocrOne(b64);
           return resolve(txt);
         }
@@ -6660,7 +7111,7 @@ async function smartSplitOcr(b64, maxH) {
         splitYs.sort((a,b) => a - b);
         console.log('[SmartSplit] 高'+h+'px→'+(splitYs.length+1)+'片 切点:', splitYs.map(function(y){return Math.round(y);}).join(','));
 
-        // 按切割点逐片 OCR
+        // 按切割点逐片 AI识别
         var chunks = [];
         var prevY = 0;
         for (var c = 0; c <= splitYs.length; c++) {
@@ -6672,7 +7123,7 @@ async function smartSplitOcr(b64, maxH) {
           var chunkText = await ocrOne(chunkB64);
           chunkText = (chunkText || '').replace(/^[a-zA-Z0-9\s]+(?=[一-鿿])/, '');
           chunks.push(chunkText);
-          console.log('[SmartSplit] 块'+(c+1)+'/'+(splitYs.length+1)+' y='+prevY+'-'+(prevY+chunkH)+' OCR:'+chunkText.length+'字');
+          console.log('[SmartSplit] 块'+(c+1)+'/'+(splitYs.length+1)+' y='+prevY+'-'+(prevY+chunkH)+' AI识别:'+chunkText.length+'字');
           prevY = splitYs[c];
         }
         resolve(chunks.join('\n'));
@@ -6683,21 +7134,24 @@ async function smartSplitOcr(b64, maxH) {
   });
 }
 
-// 单次 PaddleOCR 调用
+// 单次 AI识别 调用
 function ocrOne(b64) {
   return new Promise((resolve, reject) => {
     protectSendMessage({ action: 'paddleLocal', b64: b64 }, response => {
       if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
       else if (response && response.ok) resolve(response.text);
-      else reject(new Error(response?.error || 'PaddleOCR失败'));
+      else reject(new Error(response?.error || 'AI识别失败'));
     });
   });
 }
 
 /**
- * 调用 PaddleOCR 服务 (支持批量多图)
+ * 调用 AI识别 服务 (支持批量多图)
  */
 async function callOfficialOcrService(imageList) {
+  // ★ 调AI识别前检查试用次数
+  var tr5 = await checkTrialRemaining();
+  if (tr5 <= 0) throw new Error('次数已用完');
   const rawImages = (imageList && imageList.length > 0) ? imageList : [await captureVisibleTab()];
   if (!rawImages || rawImages.length === 0) throw new Error('无法获取截图');
 
@@ -6710,26 +7164,26 @@ async function callOfficialOcrService(imageList) {
     // 展示存储用 displayImage（已压缩），旧格式兜底 compressForDisplay
     var resumeImage = isNewFormat ? item.displayImage : await compressForDisplay(ocrDataUrl);
 
-    // ★ 智能分片 OCR：图片高度 >2000px 时在空白行处切开逐片识别，避免 PaddleOCR 降采样
+    // ★ 智能分片 AI识别：图片高度 >2000px 时在空白行处切开逐片识别，避免 AI识别 降采样
     var rawText = await smartSplitOcr(b64);
 
     var len = rawText.length;
-    console.log('[PaddleOCR] 原文:', len, '字');
-    if (len < 50) throw new Error('PaddleOCR文字太少(' + len + '字)');
-    DEBUG && showPanelMsg('PaddleOCR:' + len + '字, DeepSeek解析中...');
+    console.log('[AI识别] 原文:', len, '字');
+    if (len < 50) throw new Error('AI识别文字太少(' + len + '字)');
+    DEBUG && showPanelMsg('AI识别:' + len + '字, AI分析解析中...');
 
-    // 2. DeepSeek JSON 结构化解析（通过后端代理，API key 在服务端）
+    // 2. AI分析 JSON 结构化解析（通过后端代理，API key 在服务端）
     var dsData = await deepseekRequest({
       model: 'deepseek-chat',
       messages: [
-        { role: 'system', content: `Parse resume OCR text into json. Output ONLY valid JSON, no markdown.
+        { role: 'system', content: `Parse resume AI识别 text into json. Output ONLY valid JSON, no markdown.
 
-OCR format: Name**tags\\nAge Experience Education Status\\n...description...\\n期望职位\\nCity | Position | Industry | Salary\\n工作经历\\nCompany1\\nTitle1\\nPeriod1\\nDesc1
+AI识别 format: Name**tags\\nAge Experience Education Status\\n...description...\\n期望职位\\nCity | Position | Industry | Salary\\n工作经历\\nCompany1\\nTitle1\\nPeriod1\\nDesc1
 
-NOTE: OCR text order may be scrambled and may contain UI banners/tooltips (e.g. "近14天你首次看到该牛人赶紧联系TA吧"). Extract each field by its label/pattern, NOT by line position. Ignore all noise phrases listed below.
+NOTE: AI识别 text order may be scrambled and may contain UI banners/tooltips (e.g. "近14天你首次看到该牛人赶紧联系TA吧"). Extract each field by its label/pattern, NOT by line position. Ignore all noise phrases listed below.
 
 Extraction rules:
-- name: the masked-name pattern = 1-3 Chinese chars immediately followed by "**" (e.g. 鲁**, 李**, 徐**女士). It may NOT be on the first line if a banner appears first — search the WHOLE text for this pattern. Trim leading non-Chinese.
+	- name: the person's name. If the full name appears (e.g. 李在明), use it directly. If the name is masked (1-3 chars + "**", e.g. 李**女士), extract that. Do NOT output "Name**" UI label text. Search whole text — it may not be on the first line.
 - age: number before "岁"
 - experience: number + "年"
 - education: 大专/本科/硕士/博士/中专/高中
@@ -6750,14 +7204,14 @@ Extraction rules:
     });
     var dsContent = dsData.choices?.[0]?.message?.content || '';
 
-    // 3. DeepSeek JSON 解析
+    // 3. AI分析 JSON 解析
     var extracted = {};
-    try { extracted = JSON.parse(dsContent.trim()); } catch(e) { console.log('[DeepSeek] JSON解析失败'); }
+    try { extracted = JSON.parse(dsContent.trim()); } catch(e) { console.log('[AI分析] JSON解析失败'); }
 
     var name = extracted.name || '';
     var age = typeof extracted.age === 'number' ? extracted.age : parseInt(extracted.age) || null;
 
-    showPanelMsg('OCR:' + (name||'?') + ' ' + (age||'?') + '岁 ' + (extracted.currentCompany||''));
+    showPanelMsg('AI识别:' + (name||'?') + ' ' + (age||'?') + '岁 ' + (extracted.currentCompany||''));
     return JSON.stringify({
       name: name, age: age,
       gender: extracted.gender || '', education: extracted.education || '',
@@ -6773,15 +7227,15 @@ Extraction rules:
       dsParsed: dsContent
     }, null, 2);
   } catch(e) {
-    console.error('[PaddleOCR]', e);
-    showPanelMsg('PaddleOCR失败:' + (e.message||'').substring(0,40));
-    throw new Error('OCR失败: ' + (e.message || ''));
+    console.error('[AI识别]', e);
+    showPanelMsg('AI识别失败:' + (e.message||'').substring(0,40));
+    throw new Error('AI识别失败: ' + (e.message || ''));
   }
 }
 
 async function callOfficialResumeEvalService(resumeContent, settings, apiKey, baseUrl) {
   const config = { model: 'deepseek-chat', systemPrompt: settings?.prompt || '' };
-  console.log('[EVAL] DeepSeek 文本评估...');
+  console.log('[EVAL] AI分析 文本评估...');
   const result = await callCustomApi(resumeContent, config);
   return { evaluation: { score: result.score, isQualified: result.score >= 80, suggestion: result.suggestion || '', details: { baseScore: result.score, additions: [], totalScore: result.score } }, shareLink: result.shareLink || null, shareCardImage: result.shareCardImage || null };
 }
@@ -7291,4 +7745,4 @@ function formatTextContent(groupedText) {
   return formattedText;
 }
 
-// Canvas 中继/消息监听链路已移除：统一使用截图 OCR
+// Canvas 中继/消息监听链路已移除：统一使用截图 AI识别
