@@ -956,8 +956,16 @@ function saveAnalysisResults() {
   const uniqueResults = Array.from(uniqueMap.values());
   window.resumeManager.analysisResults = uniqueResults;
 
-  // IndexedDB 持久化 — 全量保存（不止最后一条）
+  // IndexedDB 持久化 — 全量保存
   window.ResumeDB.saveAll(uniqueResults).catch(e => console.warn('[DB] 全量保存失败:', e));
+  // ★ 同时写 chrome.storage.local 兜底（IndexedDB 加载失败时回退）
+  try {
+    var _slim = uniqueResults.map(function(r) {
+      return {resumeId: r.resumeId, name: r.name, evaluation: r.evaluation,
+              timestamp: r.timestamp, age: r.age, education: r.education};
+    });
+    await new Promise(function(r) { chrome.storage.local.set({analysisResults: _slim}, r); });
+  } catch(e) {}
 }
 
 // 提取简历内容函数
