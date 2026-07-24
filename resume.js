@@ -76,7 +76,7 @@ async function checkTrialRemaining() {
 }
 
 async function checkTrialRemaining() {
-  if (!('1586IS_PAID1586' === 'true')) return 999999;
+  if (!('$$IS_PAID$$' === 'true')) return 999999;
   try {
     var _trRes = await new Promise(function(r) { chrome.storage.local.get(["pro_activated", "pro_trial_remaining"], r); });
     if (_trRes.pro_activated) return 999999;
