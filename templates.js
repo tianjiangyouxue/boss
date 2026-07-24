@@ -27,7 +27,7 @@ const templates = {
     <div class="hr-tabs" style="display:flex; border-bottom:1px solid #eee; background:#fafafa;">
       <button class="hr-tab active" data-tab="analyze" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid #06b95d; color:#06b95d; font-weight:500;">🔍 AI读简历</button>
       <button class="hr-tab" data-tab="collect" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid transparent; color:#666;">📩 求简历</button>
-      <button class="hr-tab" data-tab="talent" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid transparent; color:#666;">👤 人才库</button>
+      <button class="hr-tab" data-tab="talent" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid transparent; color:#666;">👤 简历库</button>
     </div>
     <div class="hr-tab-panel" data-panel="analyze">
     <div class="hr-results">

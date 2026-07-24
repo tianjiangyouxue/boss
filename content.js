@@ -412,6 +412,7 @@ function setupEventListeners(container) {
       container.querySelectorAll('.hr-tab-panel').forEach(p => {
         p.style.display = p.getAttribute('data-panel') === name ? '' : 'none';
       });
+      if (name === 'talent') loadTalentPool('');
     });
   });
 
@@ -460,7 +461,7 @@ function setupEventListeners(container) {
     });
   }
 
-  // ★ 人才库
+  // ★ 简历库
   var talentSearch = container.querySelector('#talentSearch');
   var talentList = container.querySelector('#talentList');
   var talentCount = container.querySelector('#talentCount');
@@ -470,19 +471,43 @@ function setupEventListeners(container) {
     try {
       var recs = (await new Promise(function(r){ chrome.storage.local.get('dl_records', r); })).dl_records || [];
       if (!filter) filter = ''; var kw = filter.toLowerCase();
-      var filtered = recs.filter(function(r){ return !kw || (r.name||'').indexOf(kw)>=0 || (r.file||'').indexOf(kw)>=0 || (r.cloud||'').indexOf(kw)>=0; });
+      var filtered = recs.filter(function(r){ return !kw || (r.name||'').indexOf(kw)>=0 || (r.file||'').indexOf(kw)>=0 || (r.cloud||'').indexOf(kw)>=0 || (r.position||'').indexOf(kw)>=0 || (r.city||'').indexOf(kw)>=0; });
       var html = '';
       for (var i = 0; i < filtered.length; i++) {
         var r = filtered[i];
-        html += '<div style="background:#fff;border:1px solid #eee;border-radius:8px;padding:10px 12px;margin-bottom:8px;">' +
-          '<div style="display:flex;justify-content:space-between;"><strong style="font-size:13px;">'+(r.name||'?')+'</strong><span style="font-size:11px;color:#999;">'+(r.time||'').substring(0,10)+'</span></div>'+
-          '<div style="font-size:11px;color:#666;margin-top:4px;">'+(r.file||'')+'</div>'+
+        var metaHtml = [];
+        if (r.position) metaHtml.push(r.position);
+        if (r.city) metaHtml.push(r.city);
+        if (r.salary) metaHtml.push(r.salary);
+        if (r.experience) metaHtml.push(r.experience);
+        html += '<div class="talent-item" data-idx="'+i+'" data-did="'+(r.dataId||'')+'" style="background:#fff;border:1px solid #eee;border-radius:8px;padding:10px 12px 10px 12px;margin-bottom:8px;position:relative;">' +
+          '<div style="padding-right:20px;"><div style="display:flex;justify-content:space-between;"><strong style="font-size:13px;">'+(r.name||'?')+'</strong><span style="font-size:11px;color:#999;">'+(r.time||'').substring(0,10)+'</span></div>'+
+          (metaHtml.length?'<div style="font-size:11px;color:#1677ff;margin-top:2px;">'+metaHtml.join(' | ')+'</div>':'')+
+          '<div style="font-size:11px;color:#666;margin-top:2px;">'+(r.file||'')+'</div>'+
           (r.cloud?'<div style="margin-top:3px;"><a href="'+r.cloud+'" target="_blank" style="font-size:11px;color:#1677ff;">☁ 查看云PDF</a></div>':'')+
+          '</div>'+
+          '<span class="talent-del" data-did="'+(r.dataId||'')+'" data-key="'+(r.dataId||r.time+'_'+r.file)+'" style="position:absolute;top:8px;right:10px;cursor:pointer;color:#bbb;font-size:16px;font-weight:bold;line-height:1;" title="删除">✕</span>'+
         '</div>';
       }
       talentList.innerHTML = html || '<div style="text-align:center;color:#999;padding:20px;">暂无下载记录</div>';
       if (talentCount) talentCount.textContent = '共 '+filtered.length+' 条';
-    } catch(e) { console.warn('人才库:', e); }
+      // 绑定删除事件
+      talentList.querySelectorAll('.talent-del').forEach(function(btn) {
+        btn.addEventListener('click', async function(e) {
+          e.stopPropagation();
+          if (!confirm('确认删除此下载记录？')) return;
+          var did = this.getAttribute('data-did');
+          var key = this.getAttribute('data-key');
+          var allRecs = (await new Promise(function(r2){ chrome.storage.local.get('dl_records', r2); })).dl_records || [];
+          var newRecs = allRecs.filter(function(rr){
+            if (did) return rr.dataId !== did;
+            return (rr.dataId||rr.time+'_'+rr.file) !== key;
+          });
+          await new Promise(function(r3){ chrome.storage.local.set({dl_records: newRecs}, r3); });
+          loadTalentPool(talentSearch ? talentSearch.value : '');
+        });
+      });
+    } catch(e) { console.warn('简历库:', e); }
   }
   if (talentSearch) talentSearch.addEventListener('input', function(){ loadTalentPool(this.value); });
   if (talentRefreshBtn) talentRefreshBtn.addEventListener('click', function(){ loadTalentPool(talentSearch?talentSearch.value:''); });
@@ -611,7 +636,11 @@ async function updateResultsDisplay() {
   // 获取当前结果
   const currentResults = window.resumeManager.analysisResults || [];
   console.log('当前结果数量:', currentResults.length);
-  
+  // 加载已下载简历列表，用于标记"已下载"
+  var dlRecs = (await new Promise(function(r){ chrome.storage.local.get('dl_records', r); })).dl_records || [];
+  var dlNames = new Set();
+  for (var dr = 0; dr < dlRecs.length; dr++) { if (dlRecs[dr].name) dlNames.add(dlRecs[dr].name); }
+
   // 获取当前阈值
   const { scoreThreshold = 80 } = await new Promise(resolve => {
     chrome.storage.sync.get(['scoreThreshold'], resolve);
@@ -692,10 +721,11 @@ async function updateResultsDisplay() {
     // 左侧信息
     const basicInfoLeft = document.createElement('div');
     basicInfoLeft.className = 'basic-info-left';
+    var isDownloaded = dlNames.has(result.name);
     basicInfoLeft.innerHTML = `
-      <span class="candidate-name">${result.name || '未知'}</span>
+      <span class="candidate-name">${result.name || '未知'}${isDownloaded ? ' <span style="font-size:10px;color:#52c41a;border:1px solid #52c41a;border-radius:3px;padding:0 4px;margin-left:4px;">已下载</span>' : ''}</span>
       <span class="candidate-info">
-        ${result.age ? result.age + '岁' : ''} · 
+        ${result.age ? result.age + '岁' : ''} ·
         ${result.currentCompany || latestWork.company || '未知公司'}
       </span>
     `;
@@ -1406,11 +1436,9 @@ async function startAIAnalysis() {
         if (path.includes('/web/chat/search')) {
           await handleSearchPageAnalysis(button);
         } else if (path.includes('/web/chat/index')) {
-          // 沟通页面暂不支持
           showError('沟通页面暂不支持 AI 读简历，请在「搜索」或「推荐牛人」页面使用');
           isAnalyzing = false;
           stopAnalysis();
-          resolve();
           return;
         } else if (path.includes('/web/chat/recommend')) {
           await handleRecommendPageAnalysis(button);

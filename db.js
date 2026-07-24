@@ -1,7 +1,7 @@
 // IndexedDB 简历数据库（替代 chrome.storage.local 存分析结果）
 (function() {
   const DB_NAME = 'hr_resume_db';
-  const DB_VERSION = 1;
+  const DB_VERSION = 3;
   const STORE = 'results';
 
   function openDB() {
@@ -16,7 +16,27 @@
         }
       };
       req.onsuccess = function(e) { resolve(e.target.result); };
-      req.onerror = function() { reject(req.error); };
+      req.onerror = function() {
+        // 版本不匹配 → 删除旧库重建
+        if (req.error && req.error.name === 'VersionError') {
+          console.warn('[DB] 版本不匹配，删除旧库重建...');
+          indexedDB.deleteDatabase(DB_NAME).then(function() {
+            var retryReq = indexedDB.open(DB_NAME, DB_VERSION);
+            retryReq.onupgradeneeded = function(ev) {
+              var db2 = ev.target.result;
+              if (!db2.objectStoreNames.contains(STORE)) {
+                var s2 = db2.createObjectStore(STORE, { keyPath: 'resumeId' });
+                s2.createIndex('timestamp', 'timestamp', { unique: false });
+                s2.createIndex('score', 'evaluation.score', { unique: false });
+              }
+            };
+            retryReq.onsuccess = function(ev) { resolve(ev.target.result); };
+            retryReq.onerror = function() { reject(retryReq.error); };
+          }).catch(function() { reject(req.error); });
+        } else {
+          reject(req.error);
+        }
+      };
     });
   }
 

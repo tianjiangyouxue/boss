@@ -956,16 +956,8 @@ async function saveAnalysisResults() {
   const uniqueResults = Array.from(uniqueMap.values());
   window.resumeManager.analysisResults = uniqueResults;
 
-  // IndexedDB 持久化 — 全量保存
-  window.ResumeDB.saveAll(uniqueResults).catch(e => console.warn('[DB] 全量保存失败:', e));
-  // ★ 同时写 chrome.storage.local 兜底（IndexedDB 加载失败时回退）
-  try {
-    var _slim = uniqueResults.map(function(r) {
-      return {resumeId: r.resumeId, name: r.name, evaluation: r.evaluation,
-              timestamp: r.timestamp, age: r.age, education: r.education};
-    });
-    await new Promise(function(r) { chrome.storage.local.set({analysisResults: _slim}, r); });
-  } catch(e) {}
+  // IndexedDB 持久化 — 全量保存（含截图）
+  await window.ResumeDB.saveAll(uniqueResults).catch(e => console.warn('[DB] 全量保存失败:', e));
 }
 
 // 提取简历内容函数
@@ -1587,10 +1579,10 @@ async function evaluateResume(resumeContent, doc = document) {
           resumeId: resumeContent.resumeId
         };
 
-        // 补全基本信息
-        if (structuredResume.name) resumeContent.name = structuredResume.name;
+        // 补全基本信息（优先保留列表卡片中的姓名，AI/OCR 可能出错）
+        if (structuredResume.name && (!resumeContent.name || resumeContent.name === '未知')) resumeContent.name = structuredResume.name;
         if (structuredResume.gender) resumeContent.gender = structuredResume.gender;
-        if (structuredResume.age) resumeContent.age = structuredResume.age;
+        if (structuredResume.age && (!resumeContent.age || resumeContent.age === '未知')) resumeContent.age = structuredResume.age;
         if (structuredResume.education) resumeContent.education = structuredResume.education;
         if (structuredResume.experience) resumeContent.experience = structuredResume.experience;
         if (structuredResume.currentTitle) resumeContent.currentTitle = structuredResume.currentTitle;
@@ -2039,8 +2031,8 @@ async function evaluateResume(resumeContent, doc = document) {
 
           // 合并API返回的candidateMeta数据，更新基本信息
           if (finalResult.candidateMeta) {
-            if (finalResult.candidateMeta.name) resumeContent.name = finalResult.candidateMeta.name;
-            if (finalResult.candidateMeta.age) resumeContent.age = finalResult.candidateMeta.age;
+            if (finalResult.candidateMeta.name && (!resumeContent.name || resumeContent.name === '未知')) resumeContent.name = finalResult.candidateMeta.name;
+            if (finalResult.candidateMeta.age && (!resumeContent.age || resumeContent.age === '未知')) resumeContent.age = finalResult.candidateMeta.age;
             if (finalResult.candidateMeta.gender) resumeContent.gender = finalResult.candidateMeta.gender;
             if (finalResult.candidateMeta.education) resumeContent.education = finalResult.candidateMeta.education;
             if (finalResult.candidateMeta.experience) resumeContent.experience = finalResult.candidateMeta.experience;
@@ -2240,8 +2232,8 @@ async function evaluateResume(resumeContent, doc = document) {
 
       // 合并API返回的candidateMeta数据，更新基本信息
       if (result.candidateMeta) {
-        if (result.candidateMeta.name) resumeContent.name = result.candidateMeta.name;
-        if (result.candidateMeta.age) resumeContent.age = result.candidateMeta.age;
+        if (result.candidateMeta.name && (!resumeContent.name || resumeContent.name === '未知')) resumeContent.name = result.candidateMeta.name;
+        if (result.candidateMeta.age && (!resumeContent.age || resumeContent.age === '未知')) resumeContent.age = result.candidateMeta.age;
         if (result.candidateMeta.gender) resumeContent.gender = result.candidateMeta.gender;
         if (result.candidateMeta.education) resumeContent.education = result.candidateMeta.education;
         if (result.candidateMeta.experience) resumeContent.experience = result.candidateMeta.experience;
@@ -3984,30 +3976,67 @@ async function closeAllShareBoxes() {
 // ==================== 通信页自动求简历/下载附件 ====================
 // 独立功能：遍历未读对话 → 附件简历可下则下载，否则求简历可点则点击
 // ==================== 下载简历附件 ====================
+// ==================== 下载简历附件 ====================
 async function handleChatResumeDownload() {
   console.log('[下载] 开始');
   var dls = 0, skips = 0;
   var setS = function(t) { showPanelMsg(t); };
   var sleep = function(ms) { return new Promise(function(r) { setTimeout(r, ms); }); };
   var processed = new Set();
-  try { await waitForElement('.geek-item[data-id]', 8000); } catch(e) { setS('未找到聊天列表'); return; }
-  var prevCnt = 0, sameCnt = 0;
+
+  // ★ 切换到"全部"筛选，不管已读未读都查一遍
+  try {
+    var filterSpans = Array.from(document.querySelectorAll('.chat-message-filter span,.chat-message-filter-right span,.chat-label-top span,.filter-tab span'));
+    var all = filterSpans.find(function(s){ var t=(s.textContent||'').trim(); return t==='全部'||t==='所有'||t==='不限'; });
+    if (all && !all.classList.contains('active')) { all.click(); console.log('[下载] 已切到全部'); await sleep(1000); }
+  } catch(e) {}
+
+  try { await waitForElement('.geek-item[data-id]', 8000); }
+  catch(e) { setS('未找到聊天列表'); return; }
+
+  var roundCnt = 0;
   while (isAnalyzing) {
-    var items = document.querySelectorAll('.geek-item[data-id]');
-    if (items.length === prevCnt) { if (++sameCnt >= 3) break; } else { prevCnt = items.length; sameCnt = 0; }
-    for (var i = 0; i < items.length; i++) {
+    roundCnt++;
+    // ★ 每轮收集未处理的 data-id（不依赖 DOM 引用）
+    var allItems = document.querySelectorAll('.geek-item[data-id]');
+    var pendingIds = [];
+    for (var ai = 0; ai < allItems.length; ai++) {
+      var d = allItems[ai].getAttribute('data-id');
+      if (d && !processed.has(d)) pendingIds.push(d);
+    }
+    if (pendingIds.length === 0) {
+      // 滚动加载更多
+      var sc3 = document.querySelector('.user-list.b-scroll-stable,.chat-user .user-container');
+      if (sc3) { sc3.scrollTop = sc3.scrollHeight; await sleep(2500); }
+      var afterScroll = document.querySelectorAll('.geek-item[data-id]');
+      for (var as2 = 0; as2 < afterScroll.length; as2++) {
+        var d2 = afterScroll[as2].getAttribute('data-id');
+        if (d2 && !processed.has(d2)) pendingIds.push(d2);
+      }
+      if (pendingIds.length === 0) break;
+    }
+
+    for (var pi = 0; pi < pendingIds.length; pi++) {
       if (!isAnalyzing) return;
-      var it = items[i], did = it.getAttribute('data-id');
-      if (!did || processed.has(did)) continue;
+      var did = pendingIds[pi];
       processed.add(did);
+      if (processed.size > 500) break;
+      // ★ 每次重新查 DOM 找到元素
+      var it = document.querySelector('.geek-item[data-id="'+did+'"]');
+      if (!it) continue;
       var nm = (it.querySelector('.geek-name')?.textContent||'').trim()||did;
+
       try {
-        it.click(); await sleep(1200);
-        try { await waitForElement('.resume-btn-content', 5000); } catch(e) {}
+        it.click(); await sleep(1500);
+        try { await waitForElement('.resume-btn-content,.chat-conversation', 5000); } catch(e) {}
         await sleep(500);
+
         var fb = document.querySelector('.resume-btn-file');
         if (!fb || fb.classList.contains('disabled')) { skips++; setS('跳过'+nm+' | 下'+dls+' 跳'+skips); continue; }
+
         fb.click(); await sleep(3000);
+
+        // 找iframe PDF URL
         var url = '';
         for (var t = 0; t < 10 && !url; t++) {
           var box = document.querySelector('.resume-recommend,.attachment-view,.dialog-wrap,[class*=dialog]');
@@ -4022,39 +4051,27 @@ async function handleChatResumeDownload() {
           }
           await sleep(500);
         }
+
         if (url) {
           var dlR = null;
           var onDl = function(m) { if (m.action==='downloadComplete') dlR = m; };
           chrome.runtime.onMessage.addListener(onDl);
           chrome.runtime.sendMessage({action:'startDownload',url:url});
-          var cloudUrl = '';
-          if (!('$$IS_PAID$$' === 'true')) {
-            try {
-              var b = await fetch(url).then(function(r){ return r.blob(); });
-              var fd = new FormData(); fd.append('file', b, nm+'.pdf');
-              var up = await fetch('http://192.168.5.235:8088/anonymous/upload', {method:'POST', body:fd});
-              var upJson = await up.json();
-              cloudUrl = upJson.data || upJson.url || '';
-              if (cloudUrl && cloudUrl.indexOf('http')!==0) cloudUrl = 'http://192.168.5.235:8088'+(cloudUrl.indexOf('/')===0?'':'/')+cloudUrl;
-            } catch(e) { console.warn('[下载] 上传云失败:', e.message); }
-          }
           for (var w = 0; w < 30 && !dlR; w++) await sleep(500);
           chrome.runtime.onMessage.removeListener(onDl);
           dls++;
           var fn = dlR ? dlR.fileName : 'resume.pdf';
-          if (fn || cloudUrl) {
-            var recs = (await new Promise(function(r){ chrome.storage.local.get('dl_records', r); })).dl_records || [];
-            recs.unshift({name: nm, file: fn, cloud: cloudUrl, time: new Date().toISOString()});
-            if (recs.length > 200) recs.length = 200;
-            await new Promise(function(r){ chrome.storage.local.set({dl_records: recs}, r); });
-          }
-          setS('下载: '+(fn||'?')+(cloudUrl?' ☁已上传':'')+' | 下'+dls+' 跳'+skips);
+          setS('下载'+nm+' ('+fn+') | 下'+dls+' 跳'+skips);
+          console.log('[下载]', nm, fn);
         } else { skips++; setS('跳过'+nm+'(无URL) | 下'+dls+' 跳'+skips); }
+
+        // 关弹窗
         var cb = document.querySelector('.resume-recommend .close-btn,.attachment-view .close-btn,.close-btn');
         if (cb) { cb.click(); await sleep(500); }
       } catch(e) { console.warn('[下载]', nm, e.message); }
       await sleep(2000 + Math.random() * 2000);
     }
+    // 滚动加载更多
     var sc = document.querySelector('.user-list.b-scroll-stable,.chat-user .user-container');
     if (sc) { sc.scrollTop = sc.scrollHeight; await sleep(2500); }
   }
@@ -5542,12 +5559,12 @@ async function forceCloseResumeDialog(docs, maxRounds) {
   seedList.push(document);
   for (var s = 0; s < seedList.length; s++) collect(seedList[s], 0);
 
-  // 找包含简历内容的弹窗容器
+  // 找包含简历内容的弹窗容器（搜索结果/推荐/沟通页均覆盖）
   function getResumeDialogs(dd) {
     if (!dd || !dd.querySelectorAll) return [];
-    var all = dd.querySelectorAll('.boss-dialog__wrapper.dialog-lib-resume, .resume-common-dialog, .boss-dialog__wrapper, .boss-popup__wrapper');
+    var all = dd.querySelectorAll('.boss-dialog__wrapper.dialog-lib-resume, .resume-common-dialog, .boss-dialog__wrapper, .boss-popup__wrapper, .resume-recommend, .attachment-view, .chat-conversation');
     return Array.from(all).filter(function(el) {
-      return el.querySelector && el.querySelector('.resume-detail-wrap, .resume-center-side, iframe[src*="c-resume"]');
+      return el.querySelector && el.querySelector('.resume-detail-wrap, .resume-center-side, iframe[src*="c-resume"], iframe.attachment-iframe, iframe[src*="pdf-viewer"], iframe[src*="bzl"], .chat-conversation, .resume-btn-content');
     });
   }
 
@@ -5559,9 +5576,9 @@ async function forceCloseResumeDialog(docs, maxRounds) {
       if (dlgs.length === 0) continue;
       anyOpen = true;
       for (var j = 0; j < dlgs.length; j++) {
-        // 只点弹窗容器内部的关闭按钮（限定在 container 范围内搜索，避免误杀推荐卡片的 .iboss-close）
+        // 只点弹窗容器内部的关闭按钮
         var container = dlgs[j];
-        var btn = container.querySelector('.dialog-close, .boss-popup__close, .boss-popup__wrapper .iboss-close, .boss-popup__wrapper .close, .iboss-close, .new-resume-online-main-ui .close-btn, .resume-common-wrap .close');
+        var btn = container.querySelector('.dialog-close, .boss-popup__close, .boss-popup__wrapper .iboss-close, .boss-popup__wrapper .close, .iboss-close, .new-resume-online-main-ui .close-btn, .resume-common-wrap .close, .resume-recommend .close-btn, .attachment-view .close-btn, .close-btn');
         if (btn && btn.offsetParent !== null) { try { btn.click(); } catch(e) {} }
         // ESC 兜底
         try { container.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true })); } catch(e) {}

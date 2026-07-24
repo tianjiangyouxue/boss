@@ -1,19 +1,20 @@
-// ★ 下载完成 → 通知页面
+// ★ 下载完成 → 通知页面（通过存储的 tabId 精准投递，不靠 active tab）
+var _dlTabMap = {}; // downloadId → tabId
 if (chrome.downloads) {
   chrome.downloads.onChanged.addListener(function(delta) {
-    if (delta.state && delta.state.current === 'complete') {
+    if (delta.state && delta.state.current === 'complete' && _dlTabMap[delta.id]) {
+      var tabId = _dlTabMap[delta.id];
       chrome.downloads.search({id: delta.id}, function(results) {
         if (results && results[0]) {
           var r = results[0];
-          chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-            if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, {
-              action: 'downloadComplete',
-              fileName: r.filename.split(/[\\/]/).pop(),
-              url: r.url
-            });
-          });
+          chrome.tabs.sendMessage(tabId, {
+            action: 'downloadComplete',
+            fileName: r.filename.split(/[\\/]/).pop(),
+            url: r.url
+          }).catch(function() {}); // 页面可能已关闭，忽略
         }
       });
+      delete _dlTabMap[delta.id];
     }
   });
 }
@@ -101,8 +102,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'startDownload') {
-    if (request.url) { chrome.downloads.download({url: request.url, saveAs: false}, function(id) { sendResponse({ok: !chrome.runtime.lastError}); }); }
-    else { sendResponse({ok: false}); }
+    if (request.url) {
+      chrome.downloads.download({url: request.url, saveAs: false}, function(id) {
+        if (!chrome.runtime.lastError && id) {
+          _dlTabMap[id] = sender.tab.id; // 记录哪个tab发起的下载
+          sendResponse({ok: true});
+        } else {
+          sendResponse({ok: false});
+        }
+      });
+    } else { sendResponse({ok: false}); }
     return true;
   }
 
