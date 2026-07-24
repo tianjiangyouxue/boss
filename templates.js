@@ -46,6 +46,7 @@ const templates = {
           仅达标简历
         </label>
         <select class="date-filter" style="margin-left: 12px; padding: 2px 6px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 12px;">
+          <option value="all" selected>全部</option>
           <option value="today">今天</option>
           <option value="yesterday">昨天</option>
           <option value="7days">近7天</option>

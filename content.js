@@ -621,7 +621,7 @@ async function updateResultsDisplay() {
   const filterCheckbox = container.querySelector('.qualified-filter');
   const showOnlyQualified = filterCheckbox?.checked || false;
   const dateSelect = container.querySelector('.date-filter');
-  const dateFilter = dateSelect ? dateSelect.value : 'today';
+  const dateFilter = dateSelect ? dateSelect.value : 'all';
   console.log('过滤器状态:', showOnlyQualified ? '仅显示达标' : '显示全部', '日期:', dateFilter);
   
   // 日期过滤函数
