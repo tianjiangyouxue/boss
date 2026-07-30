@@ -24,6 +24,7 @@ const templates = {
       <span id="errorMessage"></span>
       <span class="close-btn">✕</span>
     </div>
+    <div id="debugLog" style="display:none; max-height:200px; overflow-y:auto; background:#1e1e1e; color:#0f0; font:11px/1.5 monospace; padding:6px 10px; margin:0; border-bottom:1px solid #333; white-space:pre-wrap; word-break:break-all;"></div>
     <div class="hr-tabs" style="display:flex; border-bottom:1px solid #eee; background:#fafafa;">
       <button class="hr-tab active" data-tab="analyze" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid #06b95d; color:#06b95d; font-weight:500;">🔍 AI读简历</button>
       <button class="hr-tab" data-tab="collect" style="flex:1; padding:8px 0; border:none; background:none; cursor:pointer; font-size:12px; border-bottom:2px solid transparent; color:#666;">📩 求简历</button>

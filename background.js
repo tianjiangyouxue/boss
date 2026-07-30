@@ -156,6 +156,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'uploadToCloud') {
+    // 代理云上传：content script 无法直接 fetch 下载链接（CORS/认证）
+    var _upUrl = 'http://192.168.5.235:8088/anonymous/upload/jianli';
+    fetch(request.url)
+      .then(function(r) { return r.blob(); })
+      .then(function(blob) {
+        var fd = new FormData();
+        fd.append('file', blob, request.filename || 'resume.pdf');
+        return fetch(_upUrl, { method: 'POST', body: fd });
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var cloud = data.data || data.url || '';
+        if (cloud && cloud.indexOf('http') !== 0) cloud = 'http://192.168.5.235:8088' + (cloud.indexOf('/') === 0 ? '' : '/') + cloud;
+        sendResponse({ ok: true, cloud: cloud });
+      })
+      .catch(function(e) { sendResponse({ ok: false, error: e.message }); });
+    return true;
+  }
+
+  if (request.action === 'searchDownloads') {
+    if (chrome.downloads && chrome.downloads.search) {
+      chrome.downloads.search(request.query || {}, function(results) {
+        sendResponse({ ok: true, results: results || [] });
+      });
+    } else { sendResponse({ ok: false, error: 'downloads API不可用' }); }
+    return true;
+  }
+
   if (request.action === 'paddleOcr') {
     // 代理 PaddleOCR: 从 b64 构建 FormData
     const byteChars = atob(request.b64);

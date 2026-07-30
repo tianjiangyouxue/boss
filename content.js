@@ -466,10 +466,15 @@ function setupEventListeners(container) {
   var talentList = container.querySelector('#talentList');
   var talentCount = container.querySelector('#talentCount');
   var talentRefreshBtn = container.querySelector('#talentRefreshBtn');
+  var talentClearBtn = container.querySelector('#talentClearBtn');
   async function loadTalentPool(filter) {
     if (!talentList) return;
     try {
-      var recs = (await new Promise(function(r){ chrome.storage.local.get('dl_records', r); })).dl_records || [];
+      var recs = [];
+      try { recs = await window.ResumeDB.loadDownloaded(); } catch(e) {}
+      // ★ debug: 打印所有 resumeId
+      var _rids = recs.map(function(r){return (r.resumeId||'NOID').substring(0,20);}).join(',');
+      debugLog('[简历库] 加载'+recs.length+'条 IDs:'+_rids.substring(0,150));
       if (!filter) filter = ''; var kw = filter.toLowerCase();
       var filtered = recs.filter(function(r){ return !kw || (r.name||'').indexOf(kw)>=0 || (r.file||'').indexOf(kw)>=0 || (r.cloud||'').indexOf(kw)>=0 || (r.position||'').indexOf(kw)>=0 || (r.city||'').indexOf(kw)>=0; });
       var html = '';
@@ -480,37 +485,41 @@ function setupEventListeners(container) {
         if (r.city) metaHtml.push(r.city);
         if (r.salary) metaHtml.push(r.salary);
         if (r.experience) metaHtml.push(r.experience);
-        html += '<div class="talent-item" data-idx="'+i+'" data-did="'+(r.dataId||'')+'" style="background:#fff;border:1px solid #eee;border-radius:8px;padding:10px 12px 10px 12px;margin-bottom:8px;position:relative;">' +
-          '<div style="padding-right:20px;"><div style="display:flex;justify-content:space-between;"><strong style="font-size:13px;">'+(r.name||'?')+'</strong><span style="font-size:11px;color:#999;">'+(r.time||'').substring(0,10)+'</span></div>'+
+        html += '<div class="talent-item" data-idx="'+i+'" data-did="'+(r.dataId||'')+'" data-rid="'+(r.resumeId||'')+'" style="background:#fff;border:1px solid #eee;border-radius:8px;padding:10px 12px 10px 12px;margin-bottom:8px;position:relative;">' +
+          '<div style="padding-right:20px;"><div style="display:flex;justify-content:space-between;"><strong style="font-size:13px;">'+(r.name||'?')+'</strong><span style="font-size:11px;color:#999;">'+(r.timestamp||'').substring(0,10)+'</span></div>'+
           (metaHtml.length?'<div style="font-size:11px;color:#1677ff;margin-top:2px;">'+metaHtml.join(' | ')+'</div>':'')+
           '<div style="font-size:11px;color:#666;margin-top:2px;">'+(r.file||'')+'</div>'+
           (r.cloud?'<div style="margin-top:3px;"><a href="'+r.cloud+'" target="_blank" style="font-size:11px;color:#1677ff;">☁ 查看云PDF</a></div>':'')+
           '</div>'+
-          '<span class="talent-del" data-did="'+(r.dataId||'')+'" data-key="'+(r.dataId||r.time+'_'+r.file)+'" style="position:absolute;top:8px;right:10px;cursor:pointer;color:#bbb;font-size:16px;font-weight:bold;line-height:1;" title="删除">✕</span>'+
+          '<span class="talent-del" data-rid="'+(r.resumeId||'')+'" data-did="'+(r.dataId||'')+'" style="position:absolute;top:8px;right:10px;cursor:pointer;color:#bbb;font-size:16px;font-weight:bold;line-height:1;" title="删除">✕</span>'+
         '</div>';
       }
-      talentList.innerHTML = html || '<div style="text-align:center;color:#999;padding:20px;">暂无下载记录</div>';
+      var debugInfo = '<div style="font-size:10px;color:#999;text-align:center;padding:2px 0;">[调试] DB:'+recs.length+'条 显示:'+filtered.length+'条'+(filter?' 搜索:'+filter:'')+'</div>';
+      talentList.innerHTML = debugInfo + (html || '<div style="text-align:center;color:#999;padding:20px;">暂无下载记录</div>');
       if (talentCount) talentCount.textContent = '共 '+filtered.length+' 条';
-      // 绑定删除事件
+      // 绑定删除事件（走 IndexedDB）
       talentList.querySelectorAll('.talent-del').forEach(function(btn) {
         btn.addEventListener('click', async function(e) {
           e.stopPropagation();
           if (!confirm('确认删除此下载记录？')) return;
-          var did = this.getAttribute('data-did');
-          var key = this.getAttribute('data-key');
-          var allRecs = (await new Promise(function(r2){ chrome.storage.local.get('dl_records', r2); })).dl_records || [];
-          var newRecs = allRecs.filter(function(rr){
-            if (did) return rr.dataId !== did;
-            return (rr.dataId||rr.time+'_'+rr.file) !== key;
-          });
-          await new Promise(function(r3){ chrome.storage.local.set({dl_records: newRecs}, r3); });
-          loadTalentPool(talentSearch ? talentSearch.value : '');
+          var rid = this.getAttribute('data-rid');
+          debugLog('[删] rid='+rid);
+          var item = this.closest('.talent-item');
+          if (item) item.remove();
+          var result = await window.ResumeDB.deleteDownloaded(rid);
+          debugLog('[删] '+(result&&result.ok?'成功':'失败:'+(result&&result.reason||'?')));
         });
       });
     } catch(e) { console.warn('简历库:', e); }
   }
   if (talentSearch) talentSearch.addEventListener('input', function(){ loadTalentPool(this.value); });
   if (talentRefreshBtn) talentRefreshBtn.addEventListener('click', function(){ loadTalentPool(talentSearch?talentSearch.value:''); });
+  if (talentClearBtn) talentClearBtn.addEventListener('click', async function(){
+    if (!confirm('确认清空简历库？')) return;
+    try { await window.ResumeDB.clearDownloaded(); showPanelMsg('[简历库] 已清空'); }
+    catch(e) { showPanelMsg('[简历库] 清空失败: '+(e&&e.message||e)); }
+    loadTalentPool('');
+  });
 
   // 拖动相关变量
   let isDragging = false;
@@ -637,9 +646,14 @@ async function updateResultsDisplay() {
   const currentResults = window.resumeManager.analysisResults || [];
   console.log('当前结果数量:', currentResults.length);
   // 加载已下载简历列表，用于标记"已下载"
-  var dlRecs = (await new Promise(function(r){ chrome.storage.local.get('dl_records', r); })).dl_records || [];
+  var dlRecs = [];
+  try { dlRecs = await window.ResumeDB.loadDownloaded(); } catch(e) {}
   var dlNames = new Set();
-  for (var dr = 0; dr < dlRecs.length; dr++) { if (dlRecs[dr].name) dlNames.add(dlRecs[dr].name); }
+  var dlCloudMap = {};
+  for (var dr = 0; dr < dlRecs.length; dr++) {
+    if (dlRecs[dr].name) dlNames.add(dlRecs[dr].name);
+    if (dlRecs[dr].name && dlRecs[dr].cloud) dlCloudMap[dlRecs[dr].name] = dlRecs[dr].cloud;
+  }
 
   // 获取当前阈值
   const { scoreThreshold = 80 } = await new Promise(resolve => {
@@ -722,8 +736,9 @@ async function updateResultsDisplay() {
     const basicInfoLeft = document.createElement('div');
     basicInfoLeft.className = 'basic-info-left';
     var isDownloaded = dlNames.has(result.name);
+    var cloudUrl = dlCloudMap[result.name] || '';
     basicInfoLeft.innerHTML = `
-      <span class="candidate-name">${result.name || '未知'}${isDownloaded ? ' <span style="font-size:10px;color:#52c41a;border:1px solid #52c41a;border-radius:3px;padding:0 4px;margin-left:4px;">已下载</span>' : ''}</span>
+      <span class="candidate-name">${result.name || '未知'}${isDownloaded ? ' <span style="font-size:10px;color:#52c41a;border:1px solid #52c41a;border-radius:3px;padding:0 4px;margin-left:4px;">已下载</span>' : ''}${cloudUrl ? ' <a href="'+cloudUrl+'" target="_blank" style="font-size:10px;color:#1677ff;margin-left:4px;">☁PDF</a>' : ''}</span>
       <span class="candidate-info">
         ${result.age ? result.age + '岁' : ''} ·
         ${result.currentCompany || latestWork.company || '未知公司'}

@@ -1,8 +1,9 @@
-// IndexedDB 简历数据库（替代 chrome.storage.local 存分析结果）
+// IndexedDB 简历数据库
 (function() {
   const DB_NAME = 'hr_resume_db';
-  const DB_VERSION = 3;
+  const DB_VERSION = 4;
   const STORE = 'results';
+  const DL_STORE = 'downloaded';
 
   function openDB() {
     return new Promise((resolve, reject) => {
@@ -14,25 +15,18 @@
           store.createIndex('timestamp', 'timestamp', { unique: false });
           store.createIndex('score', 'evaluation.score', { unique: false });
         }
+        if (!db.objectStoreNames.contains(DL_STORE)) {
+          db.createObjectStore(DL_STORE, { keyPath: 'resumeId' });
+        }
       };
       req.onsuccess = function(e) { resolve(e.target.result); };
       req.onerror = function() {
-        // 版本不匹配 → 删除旧库重建
+        // 版本不匹配 → 用不指定版本的方式打开（保留数据）
         if (req.error && req.error.name === 'VersionError') {
-          console.warn('[DB] 版本不匹配，删除旧库重建...');
-          indexedDB.deleteDatabase(DB_NAME).then(function() {
-            var retryReq = indexedDB.open(DB_NAME, DB_VERSION);
-            retryReq.onupgradeneeded = function(ev) {
-              var db2 = ev.target.result;
-              if (!db2.objectStoreNames.contains(STORE)) {
-                var s2 = db2.createObjectStore(STORE, { keyPath: 'resumeId' });
-                s2.createIndex('timestamp', 'timestamp', { unique: false });
-                s2.createIndex('score', 'evaluation.score', { unique: false });
-              }
-            };
-            retryReq.onsuccess = function(ev) { resolve(ev.target.result); };
-            retryReq.onerror = function() { reject(retryReq.error); };
-          }).catch(function() { reject(req.error); });
+          console.warn('[DB] 版本不匹配，尝试兼容打开...');
+          var fallbackReq = indexedDB.open(DB_NAME);
+          fallbackReq.onsuccess = function(ev) { resolve(ev.target.result); };
+          fallbackReq.onerror = function() { reject(fallbackReq.error); };
         } else {
           reject(req.error);
         }
@@ -121,6 +115,78 @@
         const req = store.get(resumeId);
         req.onsuccess = function() { resolve(req.result || null); };
         req.onerror = function() { reject(req.error); };
+      });
+    },
+
+    // ★ 下载记录专用（独立表，避免 saveAll 清空 results 时误删）
+    async saveDownloaded(info) {
+      var db = await openDB();
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(DL_STORE, 'readwrite');
+        var store = tx.objectStore(DL_STORE);
+        store.put(info);
+        tx.oncomplete = resolve;
+        tx.onerror = function() { reject(tx.error); };
+      });
+    },
+    async loadDownloaded() {
+      var db = await openDB();
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(DL_STORE, 'readonly');
+        var store = tx.objectStore(DL_STORE);
+        var req = store.getAll();
+        req.onsuccess = function() {
+          var rows = req.result || [];
+          rows.sort(function(a, b) { return new Date(b.timestamp) - new Date(a.timestamp); });
+          resolve(rows);
+        };
+        req.onerror = function() { reject(req.error); };
+      });
+    },
+
+    // 清空下载表
+    async clearDownloaded() {
+      var db = await openDB();
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(DL_STORE, 'readwrite');
+        tx.objectStore(DL_STORE).clear();
+        tx.oncomplete = function() { resolve(); };
+        tx.onerror = function() { reject(tx.error); };
+      });
+    },
+
+    // 删除下载记录 → clear+重写（已验证可靠，Chrome 单请求事务不刷盘）
+    async deleteDownloaded(resumeId) {
+      var db = await openDB();
+      var all = await new Promise(function(resolve) {
+        var tx = db.transaction(DL_STORE, 'readonly');
+        var req = tx.objectStore(DL_STORE).getAll();
+        req.onsuccess = function() { resolve(req.result || []); };
+        req.onerror = function() { resolve([]); };
+      });
+      var keep = all.filter(function(r){ return r.resumeId !== resumeId; });
+      if (keep.length === all.length) return {ok: false, reason: '未找到: '+resumeId};
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(DL_STORE, 'readwrite');
+        var store = tx.objectStore(DL_STORE);
+        store.clear();                       // 请求1
+        for (var i = 0; i < keep.length; i++) { store.put(keep[i]); }  // 请求2~N，事务保持活跃
+        tx.oncomplete = function() { resolve({ok: true}); };
+        tx.onerror = function() { reject(tx.error); };
+      });
+    },
+
+    // 删除一条
+    async delete(resumeId) {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        const store = tx.objectStore(STORE);
+        var req = store.delete(resumeId);
+        req.onsuccess = function() {};
+        req.onerror = function(e) { reject(e.target.error); };
+        tx.oncomplete = function() { resolve(); };
+        tx.onerror = function() { reject(tx.error); };
       });
     },
 

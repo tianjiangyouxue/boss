@@ -102,6 +102,25 @@ function showPanelMsg(msg) {
   if (msgEl) { msgEl.textContent = '[' + _panelMsgCount + '] ' + msg; el.classList.add('show'); }
 }
 
+// ★ 多行调试日志（追加到 debugLog 区域）
+var _debugLines = [];
+function debugLog(msg) {
+  var el = document.querySelector('#hr-panel-unique #debugLog');
+  if (!el) return;
+  var t = new Date().toTimeString().substring(0,8);
+  _debugLines.push('['+t+'] '+msg);
+  if (_debugLines.length > 50) _debugLines.shift();
+  el.textContent = _debugLines.join('\n');
+  el.style.display = 'block';
+  el.scrollTop = el.scrollHeight;
+}
+// 清空调试日志
+function debugLogClear() {
+  _debugLines = [];
+  var el = document.querySelector('#hr-panel-unique #debugLog');
+  if (el) { el.textContent = ''; el.style.display = 'none'; }
+}
+
 // 初始化获取 tabId
 chrome.runtime.sendMessage({ type: 'GET_TAB_ID' }, response => {
   if (response && response.tabId) {
@@ -866,19 +885,32 @@ window.resumeManager = window.resumeManager || {
 
 // 添加获取模型设置的函数
 function getModel() {
-  return Promise.resolve('deepseek-chat');
+  return Promise.resolve('deepseek-v4-flash');
 }
 
 // AI分析 调用统一走后端代理，API key 只存在于服务端（后端地址由构建时 $$BACKEND_URL$$ 决定）
 async function deepseekRequest(body) {
-  // ★ 调AI分析前检查试用次数
   var tr = await checkTrialRemaining();
   if (tr <= 0) throw new Error('次数已用完');
+  debugLog('DeepSeek请求: model='+(body.model||'?')+' msgs='+body.messages.length+' userLen='+(body.messages[body.messages.length-1]?.content||'').length);
   return new Promise((resolve, reject) => {
+    var t0 = Date.now();
     protectSendMessage({ action: 'deepseekProxy', body }, response => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else if (response && response.ok) resolve(response.data);
-      else reject(new Error(response?.error || '后端服务不可用'));
+      var dt = Date.now()-t0;
+      if (chrome.runtime.lastError) {
+        debugLog('DeepSeek失败(扩展): '+chrome.runtime.lastError.message);
+        reject(new Error(chrome.runtime.lastError.message));
+      }
+      else if (response && response.ok) {
+        var d = response.data;
+        var txt = typeof d === 'string' ? d : JSON.stringify(d);
+        debugLog('DeepSeek响应: '+dt+'ms '+txt.length+'字\n'+txt.substring(0,300));
+        resolve(d);
+      }
+      else {
+        debugLog('DeepSeek失败(后端): '+(response?.error||'未知')+' '+dt+'ms');
+        reject(new Error(response?.error || '后端服务不可用'));
+      }
     });
   });
 }
@@ -3980,98 +4012,167 @@ async function closeAllShareBoxes() {
 async function handleChatResumeDownload() {
   console.log('[下载] 开始');
   var dls = 0, skips = 0;
-  var setS = function(t) { showPanelMsg(t); };
+  var setS = function(t) { showPanelMsg('[下载] '+t); };
   var sleep = function(ms) { return new Promise(function(r) { setTimeout(r, ms); }); };
   var processed = new Set();
 
-  // ★ 切换到"全部"筛选，不管已读未读都查一遍
+  setS('启动，等待聊天列表...');
+  try { await waitForElement('.geek-item[data-id]', 8000); } catch(e) { setS('未找到聊天列表'); return; }
+
+  // ★ 切换到"全部"筛选，确保所有对话可见
   try {
     var filterSpans = Array.from(document.querySelectorAll('.chat-message-filter span,.chat-message-filter-right span,.chat-label-top span,.filter-tab span'));
-    var all = filterSpans.find(function(s){ var t=(s.textContent||'').trim(); return t==='全部'||t==='所有'||t==='不限'; });
-    if (all && !all.classList.contains('active')) { all.click(); console.log('[下载] 已切到全部'); await sleep(1000); }
-  } catch(e) {}
+    var allTab = filterSpans.find(function(s){ var t=(s.textContent||'').trim(); return t==='全部'||t==='所有'||t==='不限'; });
+    if (allTab && !allTab.classList.contains('active')) {
+      allTab.click();
+      debugLog('[下载] 已切换到"全部"筛选');
+      await sleep(1000);
+    } else { debugLog('[下载] 筛选: '+(allTab?(allTab.classList.contains('active')?'已是全部':'未找到active'):'未找到全部标签')); }
+  } catch(e) { debugLog('[下载] 切全部筛选失败: '+e.message); }
 
-  try { await waitForElement('.geek-item[data-id]', 8000); }
-  catch(e) { setS('未找到聊天列表'); return; }
+  // ★ 加载已下载记录的 dataId，用于跳过
+  debugLog('[下载] 加载已下载记录...');
+  var existRecs = [];
+  try { existRecs = await window.ResumeDB.loadDownloaded(); } catch(e) {}
+  var downloadedIds = new Set();
+  for (var ei = 0; ei < existRecs.length; ei++) {
+    if (existRecs[ei].dataId) downloadedIds.add(existRecs[ei].dataId);
+  }
 
-  var roundCnt = 0;
+  var prevCnt = 0, sameCnt = 0;
+  debugLog('[下载] 开始遍历，初始列表'+document.querySelectorAll('.geek-item[data-id]').length+'条');
   while (isAnalyzing) {
-    roundCnt++;
-    // ★ 每轮收集未处理的 data-id（不依赖 DOM 引用）
-    var allItems = document.querySelectorAll('.geek-item[data-id]');
-    var pendingIds = [];
-    for (var ai = 0; ai < allItems.length; ai++) {
-      var d = allItems[ai].getAttribute('data-id');
-      if (d && !processed.has(d)) pendingIds.push(d);
-    }
-    if (pendingIds.length === 0) {
-      // 滚动加载更多
-      var sc3 = document.querySelector('.user-list.b-scroll-stable,.chat-user .user-container');
-      if (sc3) { sc3.scrollTop = sc3.scrollHeight; await sleep(2500); }
-      var afterScroll = document.querySelectorAll('.geek-item[data-id]');
-      for (var as2 = 0; as2 < afterScroll.length; as2++) {
-        var d2 = afterScroll[as2].getAttribute('data-id');
-        if (d2 && !processed.has(d2)) pendingIds.push(d2);
-      }
-      if (pendingIds.length === 0) break;
-    }
+    var items = document.querySelectorAll('.geek-item[data-id]');
+    if (items.length === prevCnt) { if (++sameCnt >= 3) { debugLog('[下载] 列表无增长('+items.length+'条)，停止'); break; } } else { prevCnt = items.length; sameCnt = 0; }
 
-    for (var pi = 0; pi < pendingIds.length; pi++) {
+    for (var i = 0; i < items.length; i++) {
       if (!isAnalyzing) return;
-      var did = pendingIds[pi];
+      var it = items[i], did = it.getAttribute('data-id');
+      if (!did || processed.has(did)) continue;
       processed.add(did);
-      if (processed.size > 500) break;
-      // ★ 每次重新查 DOM 找到元素
-      var it = document.querySelector('.geek-item[data-id="'+did+'"]');
-      if (!it) continue;
       var nm = (it.querySelector('.geek-name')?.textContent||'').trim()||did;
 
+      // ★ 库里已有则跳过
+      if (downloadedIds.has(did)) {
+        setS('跳过'+nm+'(已下载) | 下'+dls+' 跳'+skips);
+        continue;
+      }
+
       try {
-        it.click(); await sleep(1500);
-        try { await waitForElement('.resume-btn-content,.chat-conversation', 5000); } catch(e) {}
+        it.click(); await sleep(1200);
+        try { await waitForElement('.resume-btn-content', 5000); } catch(e) {}
         await sleep(500);
 
         var fb = document.querySelector('.resume-btn-file');
-        if (!fb || fb.classList.contains('disabled')) { skips++; setS('跳过'+nm+' | 下'+dls+' 跳'+skips); continue; }
+        if (!fb) { skips++; setS('跳过'+nm+'(无附件按钮) | 下'+dls+' 跳'+skips); debugLog('跳过 '+nm+': 无.resume-btn-file'); continue; }
+        if (fb.classList.contains('disabled')) { skips++; setS('跳过'+nm+'(附件disabled) | 下'+dls+' 跳'+skips); debugLog('跳过 '+nm+': 附件disabled'); continue; }
 
+        debugLog('点击附件按钮: '+nm);
         fb.click(); await sleep(3000);
 
-        // 找iframe PDF URL
-        var url = '';
-        for (var t = 0; t < 10 && !url; t++) {
-          var box = document.querySelector('.resume-recommend,.attachment-view,.dialog-wrap,[class*=dialog]');
-          if (box) {
-            var fr = box.querySelector('iframe.attachment-iframe,iframe[src*=bzl],iframe[src*=pdf-viewer]');
-            if (fr) {
-              url = fr.getAttribute('src')||'';
-              var m = url.match(/[?&]url=([^&]+)/);
-              if (m) url = decodeURIComponent(m[1]);
-              if (url && url.indexOf('http')!==0) url = (url.indexOf('//')===0?'https:':'')+url;
-            }
-          }
+        // ★ 点附件弹窗里的下载图标（.attachment-resume-btns 最后一个 .icon-content）
+        var dlBtn = null;
+        for (var wt = 0; wt < 10; wt++) {
+          var btns = document.querySelectorAll('.attachment-resume-btns .icon-content');
+          // 最后一个 icon-content 是下载按钮
+          if (btns.length >= 3) { dlBtn = btns[btns.length-1]; break; }
           await sleep(500);
         }
+        if (!dlBtn) { skips++; setS('跳过'+nm+'(无下载按钮) | 下'+dls+' 跳'+skips); debugLog('跳过 '+nm+': 弹窗内无.attachment-resume-btns .icon-content'); continue; }
 
-        if (url) {
-          var dlR = null;
-          var onDl = function(m) { if (m.action==='downloadComplete') dlR = m; };
-          chrome.runtime.onMessage.addListener(onDl);
-          chrome.runtime.sendMessage({action:'startDownload',url:url});
-          for (var w = 0; w < 30 && !dlR; w++) await sleep(500);
-          chrome.runtime.onMessage.removeListener(onDl);
+        debugLog('模拟点击下载图标: '+nm);
+        // ★ 记录点击前的最新下载ID集合（通过background代理查询）
+        var prevIds = new Set();
+        try {
+          var _preResp = await new Promise(function(r){ protectSendMessage({action:'searchDownloads',query:{limit:30}}, function(resp){ r(resp); }); });
+          if (_preResp && _preResp.ok) for (var pp = 0; pp < _preResp.results.length; pp++) { prevIds.add(_preResp.results[pp].id); }
+        } catch(e) { debugLog('[下载] 查询下载列表失败: '+e.message); }
+
+        // ★ 模拟完整鼠标点击
+        var rect = dlBtn.getBoundingClientRect();
+        var cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
+        ['mouseover','mousedown','mouseup','click'].forEach(function(evt) {
+          dlBtn.dispatchEvent(new MouseEvent(evt, {bubbles:true, cancelable:true, clientX:cx, clientY:cy, view:window}));
+        });
+        var inner = dlBtn.querySelector('span,svg');
+        if (inner) {
+          var ir = inner.getBoundingClientRect();
+          var ix = ir.left + ir.width/2, iy = ir.top + ir.height/2;
+          ['mouseover','mousedown','mouseup','click'].forEach(function(evt) {
+            inner.dispatchEvent(new MouseEvent(evt, {bubbles:true, cancelable:true, clientX:ix, clientY:iy, view:window}));
+          });
+        }
+
+        // ★ 轮询查找新下载（通过background代理，对比id集合）
+        setS('已点击，等待下载...');
+        var dlFile = '', dlItem = null;
+        var allIds = Array.from(prevIds).join(',').substring(0, 50);
+        for (var wt2 = 0; wt2 < 40; wt2++) {
+          await sleep(500);
+          var _resp = await new Promise(function(r){
+            protectSendMessage({action:'searchDownloads',query:{limit:50}}, function(resp){ r(resp); });
+          });
+          if (!_resp || !_resp.ok || !_resp.results) { if (wt2 <= 1) debugLog('[下载] 查询失败: '+JSON.stringify(_resp).substring(0,100)); continue; }
+          var newItems = _resp.results.filter(function(x){return !prevIds.has(x.id);});
+          // 只看 PDF 文件
+          var newPdfs = newItems.filter(function(x){return (x.filename||'').toLowerCase().indexOf('.pdf')>=0;});
+          if (wt2 <= 1) {
+            var brief = newPdfs.length>0 ? newPdfs.map(function(x){return x.id+':'+x.state;}).join(',') : (newItems.length>0 ? '非PDF:'+newItems.map(function(x){return x.id+':'+x.state;}).join(',') : '无新下载');
+            debugLog('[下载] 轮询'+wt2+': '+brief);
+          }
+          for (var ri = 0; ri < newPdfs.length; ri++) {
+            var _item = newPdfs[ri];
+            if (_item.state === 'complete') {
+              var _fn = (_item.filename||'').split(/[\\/]/).pop().replace(/\s*\(\d+\)(?=\.pdf$)/i, '');
+              // ★ 文件名必须包含聊天对象名字，防止捡到别人的下载
+              if (_fn.indexOf(nm) < 0 && nm.length >= 2) { debugLog('[下载] 跳过不匹配文件: '+_fn); continue; }
+              dlFile = _fn;
+              dlItem = _item;
+              wt2 = 99; break;
+            }
+            if (_item.state === 'in_progress') {
+              setS('下载中('+((_item.filename||'').split(/[\\/]/).pop()||'?')+')...');
+            }
+          }
+          if (wt2 >= 99) break;
+          if (wt2 >= 38) debugLog('[下载] 超时 已知前几个:'+allIds);
+        }
+
+        if (dlFile && dlItem) {
           dls++;
-          var fn = dlR ? dlR.fileName : 'resume.pdf';
-          setS('下载'+nm+' ('+fn+') | 下'+dls+' 跳'+skips);
-          console.log('[下载]', nm, fn);
-        } else { skips++; setS('跳过'+nm+'(无URL) | 下'+dls+' 跳'+skips); }
+          // 解析文件名：`【职位_城市 薪资】姓名 经验.pdf`
+          var _parsed = dlFile.match(/【(.+?)_(.+?)\s+(.+?)】(.+?)\s+(.+)\.pdf/);
+          var _entry = {resumeId:'dl_'+did, name:nm, file:dlFile, dataId:did, timestamp:new Date().toISOString()};
+          if (_parsed) { _entry.position=_parsed[1]; _entry.city=_parsed[2]; _entry.salary=_parsed[3]; _entry.chatName=_parsed[4]; _entry.experience=_parsed[5]; }
+          // 云上传（通过 background 代理，解决 CORS 问题）
+          var _dlUrl = dlItem.url || '';
+          if (_dlUrl && !('$$IS_PAID$$' === 'true')) {
+            setS('上传云中...');
+            debugLog('[云] 上传: '+dlFile);
+            try {
+              var _upResp = await new Promise(function(r){
+                protectSendMessage({action:'uploadToCloud', url:_dlUrl, filename:dlFile}, function(resp){ r(resp); });
+              });
+              if (_upResp && _upResp.ok) {
+                _entry.cloud = _upResp.cloud || '';
+                debugLog('[云] 上传成功: '+_entry.cloud.substring(0,80));
+              } else {
+                debugLog('[云] 上传失败: '+(_upResp?.error||'未知'));
+              }
+            } catch(e) { debugLog('[云] 上传失败: '+e.message); }
+          }
+          // 存 IndexedDB downloaded 表
+          try { await window.ResumeDB.saveDownloaded(_entry); setS('下载: '+dlFile+(_entry.cloud?' ☁已上传':'')+' ☑入库 | 下'+dls+' 跳'+skips); debugLog('✓ 下载成功: '+dlFile+(_entry.cloud?' ☁已上传':'')); }
+          catch(e) { setS('下载: '+dlFile+(_entry.cloud?' ☁已上传':'')+' ⚠入库失败 | 下'+dls+' 跳'+skips); debugLog('✗ 入库失败: '+e.message); }
+        } else { skips++; setS('跳过'+nm+'(未检测到下载) | 下'+dls+' 跳'+skips); debugLog('跳过 '+nm+': 20秒内未检测到下载完成'); }
 
-        // 关弹窗
-        var cb = document.querySelector('.resume-recommend .close-btn,.attachment-view .close-btn,.close-btn');
+        // 关弹窗：.boss-dialog__body > .close-btn 或 .new-resume-online-main-ui > .close-btn
+        var cb = document.querySelector('.boss-dialog__body .close-btn,.new-resume-online-main-ui .close-btn,.resume-recommend .close-btn,.close-btn');
         if (cb) { cb.click(); await sleep(500); }
       } catch(e) { console.warn('[下载]', nm, e.message); }
       await sleep(2000 + Math.random() * 2000);
     }
-    // 滚动加载更多
+    // 滚动
     var sc = document.querySelector('.user-list.b-scroll-stable,.chat-user .user-container');
     if (sc) { sc.scrollTop = sc.scrollHeight; await sleep(2500); }
   }
@@ -4141,6 +4242,15 @@ async function handleChatResumeCollection() {
         // 等对话详情/工具栏出现
         try { await waitForElement('.resume-btn-content, .operate-exchange-left, .chat-conversation', 5000); } catch(e) {}
         await sleep(400);
+
+        // ★ 如果有附件简历可用，跳过不求
+        var hasAttach = document.querySelector('.resume-btn-file');
+        if (hasAttach && !hasAttach.classList.contains('disabled')) {
+          skipped++;
+          setStatus('跳过'+name+'(已有附件) | 已有'+downloaded+' 求'+requested+' 跳'+skipped);
+          console.log('[求简历] 跳过(已有附件):', name);
+          continue;
+        }
 
         // ★ 求简历：不下载附件，直接请求：.operate-btn 文字含"求简历" 且无 disabled
         var reqBtn = Array.from(document.querySelectorAll('.operate-btn')).filter(function(b){
@@ -7081,12 +7191,14 @@ async function smartSplitOcr(b64, maxH) {
       try {
         var w = img.width, h = img.height;
         if (h <= maxH) {
-          // 高度合适，直接 AI识别
+          showPanelMsg('[OCR] '+w+'x'+h+' 单次识别');
+          debugLog('图片尺寸: '+w+'x'+h+' (≤2000, 单次)');
           var txt = await ocrOne(b64);
           return resolve(txt);
         }
 
-        // 图片太高 → 画到 canvas 读取像素找空白分割行
+        showPanelMsg('[OCR] '+w+'x'+h+' 智能分片');
+        debugLog('图片尺寸: '+w+'x'+h+' (>2000, 分片识别)');
         var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
         var cx = cv.getContext('2d');
         cx.drawImage(img, 0, 0);
@@ -7135,6 +7247,8 @@ async function smartSplitOcr(b64, maxH) {
         }
         splitYs.sort((a,b) => a - b);
         console.log('[SmartSplit] 高'+h+'px→'+(splitYs.length+1)+'片 切点:', splitYs.map(function(y){return Math.round(y);}).join(','));
+        showPanelMsg('[OCR] 分'+(splitYs.length+1)+'片识别');
+        debugLog('分'+(splitYs.length+1)+'片 切点: '+splitYs.map(function(y){return Math.round(y);}).join(','));
 
         // 按切割点逐片 AI识别
         var chunks = [];
@@ -7161,11 +7275,30 @@ async function smartSplitOcr(b64, maxH) {
 
 // 单次 AI识别 调用
 function ocrOne(b64) {
+  var t0 = Date.now();
+  var kb = (b64.length/1024).toFixed(0);
+  showPanelMsg('[OCR] 发送请求('+kb+'KB)...');
+  debugLog('OCR发送: '+kb+'KB');
   return new Promise((resolve, reject) => {
     protectSendMessage({ action: 'paddleLocal', b64: b64 }, response => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else if (response && response.ok) resolve(response.text);
-      else reject(new Error(response?.error || 'AI识别失败'));
+      var dt = Date.now()-t0;
+      if (chrome.runtime.lastError) {
+        showPanelMsg('[OCR] 失败: '+chrome.runtime.lastError.message);
+        debugLog('OCR失败(扩展): '+chrome.runtime.lastError.message);
+        reject(new Error(chrome.runtime.lastError.message));
+      }
+      else if (response && response.ok) {
+        var txt = response.text || '';
+        showPanelMsg('[OCR] ✓ '+txt.length+'字 '+dt+'ms');
+        debugLog('OCR返回: '+txt.length+'字 '+dt+'ms | '+txt.substring(0,80).replace(/\n/g,'↵'));
+        resolve(txt);
+      }
+      else {
+        var err = response?.error || '未知错误';
+        showPanelMsg('[OCR] 失败: '+err);
+        debugLog('OCR失败(服务端): '+err);
+        reject(new Error(response?.error || 'AI识别失败'));
+      }
     });
   });
 }
@@ -7194,12 +7327,15 @@ async function callOfficialOcrService(imageList) {
 
     var len = rawText.length;
     console.log('[AI识别] 原文:', len, '字');
-    if (len < 50) throw new Error('AI识别文字太少(' + len + '字)');
-    DEBUG && showPanelMsg('AI识别:' + len + '字, AI分析解析中...');
+    showPanelMsg('[OCR] 完成:'+len+'字');
+    debugLog('OCR总计: '+len+'字\n---OCR原文前200字---\n'+rawText.substring(0,200)+'\n---OCR原文尾100字---\n'+rawText.substring(Math.max(0,len-100)));
+    if (len < 50) { debugLog('错误: OCR文字太少('+len+'字)'); throw new Error('AI识别文字太少(' + len + '字)'); }
+    showPanelMsg('[OCR] 开始AI分析...');
+    debugLog('→ 发送DeepSeek分析...');
 
     // 2. AI分析 JSON 结构化解析（通过后端代理，API key 在服务端）
     var dsData = await deepseekRequest({
-      model: 'deepseek-chat',
+      model: 'deepseek-v4-flash',
       messages: [
         { role: 'system', content: `Parse resume AI识别 text into json. Output ONLY valid JSON, no markdown.
 
@@ -7259,7 +7395,7 @@ Extraction rules:
 }
 
 async function callOfficialResumeEvalService(resumeContent, settings, apiKey, baseUrl) {
-  const config = { model: 'deepseek-chat', systemPrompt: settings?.prompt || '' };
+  const config = { model: 'deepseek-v4-flash', systemPrompt: settings?.prompt || '' };
   console.log('[EVAL] AI分析 文本评估...');
   const result = await callCustomApi(resumeContent, config);
   return { evaluation: { score: result.score, isQualified: result.score >= 80, suggestion: result.suggestion || '', details: { baseScore: result.score, additions: [], totalScore: result.score } }, shareLink: result.shareLink || null, shareCardImage: result.shareCardImage || null };
