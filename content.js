@@ -783,13 +783,14 @@ async function updateResultsDisplay() {
       ${result.evaluation ? `
         <div class="result-score-details">
           <h4>评分明细：</h4>
+          ${(result.evaluation.details?.baseScore || 0) > 0 ? `
           <div class="base-score">
             <span class="detail-key">基础分：</span>
             <span class="detail-value">${result.evaluation.details?.baseScore || 0}</span>
-          </div>
+          </div>` : ''}
           ${result.evaluation.details?.additions ? `
             <div class="additions-list">
-              <div class="detail-key">评分标准：</div>
+              <div class="detail-key">得分构成：</div>
               <ul>
                 ${Array.isArray(result.evaluation.details.additions) ? 
                   result.evaluation.details.additions.map(addition => `

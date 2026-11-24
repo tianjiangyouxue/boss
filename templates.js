@@ -131,7 +131,7 @@ const templates = {
           </div>
         </div>
       ` : ''}
-      ${details.baseScore !== undefined ? `
+      ${details.baseScore > 0 ? `
         <div class="score-item base-score">
           <div class="score-rule">
             <span class="score-label">基础评分</span>
@@ -586,7 +586,7 @@ const templates = {
             <span>${latestCompany}</span>
           </div>
           <div class="evaluation-details">
-            ${result.evaluation?.details.additions.map(item => `
+            ${(result.evaluation?.details?.additions || []).map(item => `
               <div class="evaluation-item">
                 <div class="rule-header">
                   <span class="rule-name">${item.rule}</span>
@@ -636,7 +636,7 @@ const templates = {
           '姓名', '年龄', '工作经验', '学历', '当前状态',
           '期望地点', '期望职位', '期望薪资',
           '最近公司', '最近职位',
-          '评分', '是否达标', '评价建议',
+          '评分', '是否达标', '得分明细', '评价建议',
           '分析时间'
         ]
       ];
@@ -660,6 +660,9 @@ const templates = {
           result.currentTitle || firstWork.title || firstWork.position || '未知',
           score.toString(),
           isQualified ? '是' : '否',
+          (result.evaluation?.details?.additions || []).map(function(a) {
+            return a.rule + ' ' + (a.score > 0 ? '+' : '') + a.score + '分(' + (a.reason || '') + ')';
+          }).join('；') || '',
           result.evaluation?.suggestion || '无',
           new Date(result.timestamp).toLocaleString()
         ]);

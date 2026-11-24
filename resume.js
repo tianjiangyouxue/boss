@@ -1471,7 +1471,8 @@ async function callCustomApi(resumeContent, config, doc = document) {
 
   // 把评估规则和 JSON 格式要求放在用户消息中，GPT-4o 更难忽略
   const jsonFormat = `\n\n---\n请严格按照以下 JSON 格式返回评估结果，不要包含任何其他文字：
-{"score":0,"analysis":"分析","highlights":["亮点"],"concerns":["顾虑"],"suggestion":"建议"}`;
+{"score":0,"scoreItems":[{"rule":"评分项","score":10,"reason":"得分/扣分依据"}],"analysis":"分析","highlights":["亮点"],"concerns":["顾虑"],"suggestion":"建议"}
+scoreItems 为得分构成明细：rule=评估维度或加减分项名称，score=该项得分（正数加分、负数扣分），reason=具体依据；各 scoreItems 合计应与 score 一致。`;
 
   console.log('callCustomApi - 通过后端代理发送请求...');
 
@@ -1510,8 +1511,20 @@ async function callCustomApi(resumeContent, config, doc = document) {
       if (!result) throw new Error('无法解析 AI 返回的 JSON: ' + content.substring(0, 200));
     }
 
+    // 得分构成明细（AI 返回 scoreItems/得分项）
+    var _rawItems = Array.isArray(result.scoreItems) ? result.scoreItems
+      : (Array.isArray(result.得分项) ? result.得分项 : (Array.isArray(result.score_items) ? result.score_items : []));
+    var scoreItems = _rawItems.map(function(it) {
+      return {
+        rule: it.rule || it.项目 || it.维度 || '评分项',
+        score: Number(it.score) || 0,
+        reason: it.reason || it.原因 || ''
+      };
+    });
+
     const finalResult = {
       score: typeof result.score === 'number' ? result.score : 0,
+      scoreItems: scoreItems,
       analysis: result.analysis || result.评价 || result.comments || '无分析内容',
       highlights: result.highlights || result.亮点 || [],
       concerns: result.concerns || result.顾虑 || result.不足 || [],
@@ -1703,11 +1716,14 @@ async function evaluateResume(resumeContent, doc = document) {
       const customResult = await callCustomApi(resumeContent, customApiConfig, doc);
 
       // 构建评估结果对象，兼容原有格式
+      var _customAdditions = (customResult.scoreItems || []).map(function(it) {
+        return { rule: it.rule || '评分项', score: Number(it.score) || 0, reason: it.reason || '' };
+      });
       const evaluation = {
         score: customResult.score,
         details: {
-          baseScore: customResult.score,
-          additions: [],
+          baseScore: _customAdditions.length > 0 ? 0 : customResult.score,
+          additions: _customAdditions,
           totalScore: customResult.score,
           analysis: customResult.analysis,
           highlights: customResult.highlights,
@@ -7629,7 +7645,12 @@ async function callOfficialResumeEvalService(resumeContent, settings, apiKey, ba
   const config = { model: 'deepseek-v4-flash', systemPrompt: settings?.prompt || '' };
   console.log('[EVAL] AI分析 文本评估...');
   const result = await callCustomApi(resumeContent, config);
-  return { evaluation: { score: result.score, isQualified: result.score >= 80, suggestion: result.suggestion || '', details: { baseScore: result.score, additions: [], totalScore: result.score } }, shareLink: result.shareLink || null, shareCardImage: result.shareCardImage || null };
+  // ★ 把 AI 返回的得分构成写入 details.additions，结果面板/导出报告可展示
+  var _additions = (result.scoreItems || []).map(function(it) {
+    return { rule: it.rule || '评分项', score: Number(it.score) || 0, reason: it.reason || '' };
+  });
+  var _baseScore = _additions.length > 0 ? 0 : result.score;
+  return { evaluation: { score: result.score, isQualified: result.score >= 80, suggestion: result.suggestion || '', details: { baseScore: _baseScore, additions: _additions, totalScore: result.score } }, shareLink: result.shareLink || null, shareCardImage: result.shareCardImage || null };
 }
 
 // 简化截图函数 - 直接截整页，不裁剪

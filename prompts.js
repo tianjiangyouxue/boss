@@ -116,6 +116,7 @@ const SYSTEM_PROMPT_SUFFIX = `
 【重要】请严格按照以下 JSON 格式返回评估结果：
 {
   "score": 0-100的整数评分,
+  "scoreItems": [{"rule": "评分项名称", "score": 10, "reason": "得分/扣分依据"}],
   "analysis": "详细的分析说明",
   "highlights": ["亮点1", "亮点2", ...],
   "concerns": ["顾虑点1", "顾虑点2", ...],
@@ -125,8 +126,9 @@ const SYSTEM_PROMPT_SUFFIX = `
 注意：
 1. 只返回 JSON，不要包含其他文字
 2. score 必须是 0-100 的整数
-3. highlights 和 concerns 是数组，可以为空数组
-4. 所有字段都必须存在`;
+3. scoreItems 为得分构成明细：rule=评估维度或加减分项，score=该项得分（正数加分、负数扣分），reason=具体依据；各 scoreItems 合计应与 score 一致
+4. highlights 和 concerns 是数组，可以为空数组
+5. 所有字段都必须存在`;
 
 // 导出模板供其他文件使用
 if (typeof window !== 'undefined') {
