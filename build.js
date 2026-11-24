@@ -23,6 +23,42 @@ function applyReplacements(code) {
   return result;
 }
 
+// ===== DOM 特征伪装：每次构建随机化注入宿主页面的自定义标识符 =====
+// 只覆盖高特征名（hr-*/ai-*/*-unique/面板自有 id），不动通用 class（如 .cancel/.close-btn），
+// 避免误伤对宿主页面元素的查询。JS/CSS/HTML 全量同步替换。
+const UI_MASK_LIST = [
+  'ai-resume-container-unique', 'ai-analysis-status', 'ai-analysis-styles',
+  'hr-dialog-overlay', 'hr-panel-header', 'hr-panel-unique', 'hr-action-btn',
+  'hr-tab-panel', 'hr-results', 'highlight-element', 'highlight-style',
+  'hr-dialog', 'hr-panel', 'hr-tab',
+  'collectStatus', 'save-template', 'downloadResumesBtn'
+];
+function makeUiMaskPairs() {
+  const used = new Set();
+  const map = {};
+  for (const name of UI_MASK_LIST) {
+    let n;
+    do { n = 'css-' + Math.random().toString(36).slice(2, 8); } while (used.has(n));
+    used.add(n);
+    map[name] = n;
+  }
+  // 长名优先，避免前缀误伤（如 hr-panel 吃掉 hr-panel-header）
+  return Object.keys(map).sort((a, b) => b.length - a.length).map(k => [k, map[k]]);
+}
+const uiMaskPairs = makeUiMaskPairs();
+let uiMaskHits = 0;
+function applyUiMask(code) {
+  let out = code;
+  for (const [orig, masked] of uiMaskPairs) {
+    const parts = out.split(orig);
+    if (parts.length > 1) {
+      uiMaskHits += parts.length - 1;
+      out = parts.join(masked);
+    }
+  }
+  return out;
+}
+
 const srcDir = __dirname;
 const outDir = path.join(srcDir, 'dist');
 
@@ -82,6 +118,8 @@ for (const file of jsFiles) {
   code = code.replace('const DEBUG = true', 'const DEBUG = false');
   // ★ 占位符替换（BUILD_TARGET 差异）
   code = applyReplacements(code);
+  // ★ DOM 特征伪装
+  code = applyUiMask(code);
   const origSize = code.length;
   totalOrig += origSize;
 
@@ -115,6 +153,7 @@ for (const file of staticFiles) {
   if (/\.(html|css|json)$/i.test(file)) {
     var sc = fs.readFileSync(src, 'utf8');
     sc = applyReplacements(sc);
+    sc = applyUiMask(sc);
     fs.writeFileSync(path.join(outDir, file), sc);
   } else {
     fs.copyFileSync(src, path.join(outDir, file));
@@ -132,6 +171,8 @@ if (!isPaid && fs.existsSync(path.join(srcDir, imgDir, 'icon_internal.png'))) {
   fs.copyFileSync(path.join(srcDir, imgDir, 'icon_internal.png'), path.join(outDir, imgDir, 'icon.png'));
   console.log('  Logo: free原图标');
 }
+
+console.log(`  DOM mask: ${uiMaskPairs.length} names, ${uiMaskHits} replacements (randomized per build)`);
 
 console.log(`\nDone! ${(totalOrig/1024).toFixed(0)}KB → ${(totalObf/1024).toFixed(0)}KB (${isPaid?'pro':'free'})`);
 console.log(`Output: ${outDir}`);

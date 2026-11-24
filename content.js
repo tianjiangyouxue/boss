@@ -427,10 +427,11 @@ function setupEventListeners(container) {
       chatDownloadBtn.addEventListener('click', async () => {
         if (isAnalyzing) { isAnalyzing = false; chatDownloadBtn.textContent = '💾 下载简历附件'; return; }
         if (!window.location.pathname.includes('/web/chat/index')) { alert('请在沟通页面使用'); return; }
+        if (!(await acquireAutomationLock())) return;
         isAnalyzing = true; chatDownloadBtn.textContent = '■ 停止';
         try { await window.resumeManager.handleChatResumeDownload(); }
         catch(e) { console.error(e); }
-        finally { isAnalyzing = false; chatDownloadBtn.textContent = '💾 下载简历附件'; }
+        finally { isAnalyzing = false; chatDownloadBtn.textContent = '💾 下载简历附件'; releaseAutomationLock(); }
       });
     }
 
@@ -446,6 +447,7 @@ function setupEventListeners(container) {
         alert('请在「沟通」页面使用此功能\n(打开 Boss 直聘的沟通/消息页)');
         return;
       }
+      if (!(await acquireAutomationLock())) return;
       isAnalyzing = true;
       chatCollectBtn.textContent = '■ 停止';
       chatCollectBtn.style.background = '#ff4d4f';
@@ -457,6 +459,7 @@ function setupEventListeners(container) {
         isAnalyzing = false;
         chatCollectBtn.textContent = '▶ 开始求简历';
         chatCollectBtn.style.background = '#06b95d';
+        releaseAutomationLock();
       }
     });
   }
@@ -1320,6 +1323,39 @@ function addKeyboardShortcuts() {
 }
 
 // 修改后的 startAIAnalysis 函数
+// ★ 单标签页 + 可见性守卫：获取自动化锁（防止多标签页同时跑）
+async function acquireAutomationLock() {
+  if (document.hidden) {
+    alert('请先把 BOSS 直聘标签页切到前台再运行（后台运行容易被风控识别）');
+    return false;
+  }
+  try {
+    const res = await chrome.storage.local.get(['analysisLock']);
+    const lk = res.analysisLock;
+    if (lk && lk.tabId !== tabId && Date.now() - lk.at < 300000) {
+      alert('另一个标签页正在运行自动化，请先停止它。');
+      return false;
+    }
+    await chrome.storage.local.set({ analysisLock: { tabId: tabId, at: Date.now() } });
+    if (window._lockHeartbeat) clearInterval(window._lockHeartbeat);
+    window._lockHeartbeat = setInterval(function () {
+      if (typeof heartbeatAnalysisLock === 'function') heartbeatAnalysisLock();
+    }, 30000);
+    return true;
+  } catch (e) {
+    return true; // storage 异常不阻塞使用
+  }
+}
+
+function releaseAutomationLock() {
+  try {
+    if (window._lockHeartbeat) { clearInterval(window._lockHeartbeat); window._lockHeartbeat = null; }
+    chrome.storage.local.get(['analysisLock'], function (r) {
+      if (r && r.analysisLock && r.analysisLock.tabId === tabId) chrome.storage.local.remove('analysisLock');
+    });
+  } catch (e) {}
+}
+
 async function startAIAnalysis() {
   // 如果正在分析中，则停止分析
   if (isAnalyzing) {
@@ -1405,6 +1441,16 @@ async function startAIAnalysis() {
 
   const button = document.querySelector('.hr-action-btn');
   console.log('开始分析简历');
+
+  // ★ 22:02 之后不启动自动分析（避免异常行为时段）
+  if (typeof isStopHourNow === 'function' && isStopHourNow()) {
+    alert('已过 22:02，按设置停止自动分析，请在明天白天使用。');
+    return;
+  }
+
+  // ★ 单标签页锁 + 页面可见性
+  if (!(await acquireAutomationLock())) return;
+
   isAnalyzing = true;
 
   try {
@@ -1504,6 +1550,7 @@ function stopAnalysis() {
   analysisLock = false;
   isScrolling = false;
   scrollStuckCount = 0;
+  releaseAutomationLock();
   
   // 清除所有可能存在的定时器
   const timers = window.setTimeout(() => {}, 0);

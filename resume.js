@@ -2309,6 +2309,82 @@ function getRandomDelay(min = 1000, max = 3000) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// ====== 拟人化 / 防监控策略 ======
+var _humanBreakCounter = 0;
+var _humanBreakThreshold = 0;
+var _rateLimitHits = 0;
+
+// 22:02 之后（当天）返回 true
+function isStopHourNow() {
+  var now = new Date();
+  return (now.getHours() * 60 + now.getMinutes()) >= (22 * 60 + 2);
+}
+
+// 非均匀随机延迟：基础区间 + 10% 概率额外拖长（模拟走神/看内容）
+function humanDelay(min, max) {
+  var d = min + Math.random() * (max - min);
+  if (Math.random() < 0.1) d += (max - min) * (0.5 + Math.random());
+  return new Promise(function (r) { setTimeout(r, Math.round(d)); });
+}
+
+// Fisher-Yates 洗牌，返回新数组（不修改原数组）
+function shuffleCards(arr) {
+  var a = arr.slice();
+  for (var i = a.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var t = a[i]; a[i] = a[j]; a[j] = t;
+  }
+  return a;
+}
+
+// 每处理 5-9 份随机休息 20-60 秒（模拟真人节奏）
+async function maybeTakeHumanBreak() {
+  _humanBreakCounter++;
+  if (_humanBreakThreshold === 0) _humanBreakThreshold = 5 + Math.floor(Math.random() * 5);
+  if (_humanBreakCounter < _humanBreakThreshold) return;
+  _humanBreakCounter = 0;
+  _humanBreakThreshold = 5 + Math.floor(Math.random() * 5);
+  var sec = 20 + Math.floor(Math.random() * 41);
+  showPanelMsg('☕ 模拟真人休息 ' + sec + ' 秒...');
+  await humanDelay(sec * 1000, sec * 1000);
+}
+
+// 到停止时段则中断分析
+function shouldStopByWorkTime() {
+  if (!isStopHourNow()) return false;
+  showPanelMsg('⏰ 已到 22:02，自动停止（避免异常行为）');
+  isAnalyzing = false;
+  return true;
+}
+
+// 页面不可见时暂停（后台标签页会被节流，也容易被风控识别）
+async function waitWhileHidden() {
+  if (!document.hidden) return;
+  showPanelMsg('⏸ 页面不可见，暂停中（请保持 BOSS 标签页在前台）');
+  while (document.hidden && isAnalyzing) {
+    if (isStopHourNow()) { isAnalyzing = false; return; }
+    await new Promise(function (r) { setTimeout(r, 1500); });
+  }
+  if (isAnalyzing) showPanelMsg('▶ 页面已可见，继续');
+}
+
+// 单标签页锁心跳
+function heartbeatAnalysisLock() {
+  try {
+    if (typeof tabId !== 'undefined' && tabId) {
+      chrome.storage.local.set({ analysisLock: { tabId: tabId, at: Date.now() } });
+    }
+  } catch (e) {}
+}
+
+// 统一守卫：心跳 + 22:02 停止 + 可见性暂停
+async function humanGuard() {
+  heartbeatAnalysisLock();
+  if (shouldStopByWorkTime()) return true;
+  await waitWhileHidden();
+  return false;
+}
+
 // 创建分析状态显示元素
 function createAnalysisStatusElement() {
   // 检查是否已存在
@@ -3117,7 +3193,9 @@ async function clickElement(element, view) {
   if (element && typeof element.click === 'function') {
     // 滚动到屏幕中央
     element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    
+    // ★ 拟人：滚动到位后停顿片刻再点击
+    await humanDelay(250, 700);
+
     // 添加闪烁效果
     element.style.transition = 'box-shadow 0.3s ease';
     element.style.boxShadow = '0 0 0 4px #3B82F6, 0 0 20px rgba(59, 130, 246, 0.5)';
@@ -3139,8 +3217,8 @@ async function clickElement(element, view) {
     } else {
       element.click();
     }
-    
-    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    await humanDelay(900, 1600);
   }
 }
 
@@ -3241,6 +3319,11 @@ async function handleSearchPageAnalysis(button) {
   const MAX_CONSECUTIVE_SCROLLS_WITHOUT_PROCESSING = 3; // 新增：最大允许的连续空滚动次数
 
   while (isAnalyzing) {
+    // ★ 22:02 后停止 / 页面不可见时暂停
+    if (await humanGuard()) break;
+    // ★ 检测 Boss 限流提示，出现则等待恢复
+    if (await detectAndWaitRateLimit()) continue;
+
     // 检测付费墙弹窗
     if (detectPaywallPopup(document) || detectPaywallPopup(iframeDoc)) {
       console.log('检测到付费墙弹窗，停止分析');
@@ -3263,7 +3346,7 @@ async function handleSearchPageAnalysis(button) {
     if (resumeCards.length === 0 && previousCardCount > 0 && filterRead) {
       console.log('当前视口所有卡片均为已读，滚动加载更多...');
       await autoScroll(iframeDoc);
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      await humanDelay(2500, 5000);
       previousCardCount = 0; // 重置以便下轮重新判断
       sameCardCountTimes = 0;
       continue;
@@ -3283,11 +3366,15 @@ async function handleSearchPageAnalysis(button) {
     let newResumeActuallyProcessedInThisPass = false; // 用于判断本轮是否有简历被 *实际处理*
     let allCurrentCardsSkippedOrProcessed = true; // 假设当前所有卡片都会被跳过或已处理
 
-    for (const card of resumeCards) {
+    // ★ 随机顺序读取（不按列表顺序挨着读）
+    for (const card of shuffleCards(Array.from(resumeCards))) {
       if (!isAnalyzing) {
         console.log('分析过程被中断 (循环内部)。');
         return;
       }
+
+      // ★ 22:02 后停止 / 页面不可见时暂停
+      if (await humanGuard()) return;
 
       // 检测付费墙弹窗
       if (detectPaywallPopup(document) || detectPaywallPopup(searchFrame?.contentDocument)) {
@@ -3363,7 +3450,7 @@ async function handleSearchPageAnalysis(button) {
           } else {
             console.log('检测到搜索页面简历使用Canvas渲染，跳过等待弹窗');
             // 等待一小段时间让Canvas渲染完成
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await humanDelay(1500, 3200);
           }
 
           if (!isAnalyzing) return;
@@ -3453,19 +3540,20 @@ async function handleSearchPageAnalysis(button) {
 
           if (!isAnalyzing) return;
 
-          await new Promise(resolve => setTimeout(resolve, isAnalyzing ? 500 : 100));
+          await humanDelay(400, 1200);
           if (!isAnalyzing) return;
 
           await window.resumeManager.closeResume(document);
           console.log(`已关闭简历 ${resumeId} 的弹窗`);
 
-          await new Promise(resolve => setTimeout(resolve, isAnalyzing ? 2000 : 100));
+          await humanDelay(1800, 4200);
+          await maybeTakeHumanBreak();
         }
       } catch (error) {
         console.error(`处理简历 ${resumeId} 时发生主错误:`, error);
         if (isAnalyzing) {
           await window.resumeManager.closeResume(document);
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await humanDelay(1800, 4000);
         }
       }
       if (!isAnalyzing) return;
@@ -3487,14 +3575,14 @@ async function handleSearchPageAnalysis(button) {
       // 准备滚动加载更多
       console.log('准备滚动加载更多简历...');
       await autoScroll(iframeDoc);
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      await humanDelay(2500, 5000);
 
       const newCardsAfterScroll = iframeDoc.querySelectorAll(cardSelector);
       if (newCardsAfterScroll.length === resumeCards.length && !newResumeActuallyProcessedInThisPass) {
         // 检查 previousCardCount 而不是 resumeCards.length，因为 resumeCards.length 是滚动前的数量
         console.log('滚动后卡片数量未增加，且本轮未处理新简历。可能已到达底部。');
         await autoScroll(iframeDoc); // 再尝试滚动一次
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await humanDelay(2500, 5000);
 
         const finalCheck = iframeDoc.querySelectorAll(cardSelector);
         if (finalCheck.length === newCardsAfterScroll.length) {
@@ -3516,7 +3604,7 @@ async function handleSearchPageAnalysis(button) {
       }
     } else if (resumeCards.length === 0 && isAnalyzing) {
       console.log('当前视口无简历卡片，但分析仍在进行中。可能是临时状态，等待下一轮。');
-      await new Promise(resolve => setTimeout(resolve, 3000)); // 等待一下看看是否加载
+      await humanDelay(2500, 5000); // 等待一下看看是否加载
     }
 
 
@@ -3549,8 +3637,9 @@ async function detectAndWaitRateLimit() {
     var toast = document.querySelector('.boss-toast .icon-toast-error');
     var text = toast && toast.parentElement ? (toast.parentElement.textContent || '') : '';
     if (/查看太频繁|操作频繁|稍后重试|过于频繁/.test(text)) {
-      // 出现限流 → 等 40-90 秒（真人等待时间）
-      var wait = 40000 + Math.random() * 50000;
+      // 出现限流 → 等 40-90 秒（真人等待时间，连续限流则递增等待）
+      _rateLimitHits = Math.min(3, _rateLimitHits + 1);
+      var wait = (40000 + Math.random() * 50000) * _rateLimitHits;
       console.warn('[限流] 检测到"查看太频繁"，等待', Math.round(wait/1000), '秒...');
       showPanelMsg('⏳ Boss限流，等待' + Math.round(wait/1000) + '秒...');
       await new Promise(r => setTimeout(r, wait));
@@ -3580,6 +3669,8 @@ async function handleChatPageAnalysis(button) {
   let dialogTimeoutCheck;
 
   while (isAnalyzing) {
+    // ★ 22:02 后停止 / 页面不可见时暂停
+    if (await humanGuard()) break;
     // ★ 每日浏览限制
     var dc2 = await getDailyCounts();
     if (dc2.browse >= DAILY_BROWSE_LIMIT) {
@@ -4042,12 +4133,16 @@ async function handleChatResumeDownload() {
   var prevCnt = 0, sameCnt = 0;
   debugLog('[下载] 开始遍历，初始列表'+document.querySelectorAll('.geek-item[data-id]').length+'条');
   while (isAnalyzing) {
+    // ★ 22:02 后停止 / 页面不可见时暂停
+    if (await humanGuard()) break;
     var items = document.querySelectorAll('.geek-item[data-id]');
     if (items.length === prevCnt) { if (++sameCnt >= 3) { debugLog('[下载] 列表无增长('+items.length+'条)，停止'); break; } } else { prevCnt = items.length; sameCnt = 0; }
 
-    for (var i = 0; i < items.length; i++) {
+    // ★ 随机顺序读取（不按列表顺序挨着读）
+    var _dlOrder = shuffleCards(Array.from(items));
+    for (var i = 0; i < _dlOrder.length; i++) {
       if (!isAnalyzing) return;
-      var it = items[i], did = it.getAttribute('data-id');
+      var it = _dlOrder[i], did = it.getAttribute('data-id');
       if (!did || processed.has(did)) continue;
       processed.add(did);
       var nm = (it.querySelector('.geek-name')?.textContent||'').trim()||did;
@@ -4211,6 +4306,8 @@ async function handleChatResumeCollection() {
   var previousCount = 0, sameCountTimes = 0;
 
   while (isAnalyzing) {
+    // ★ 22:02 后停止 / 页面不可见时暂停
+    if (await humanGuard()) break;
     // 每日分享额度检查
     var dc = await getDailyCounts();
     if (dc.share >= DAILY_SHARE_LIMIT) {
@@ -4218,8 +4315,8 @@ async function handleChatResumeCollection() {
       break;
     }
 
-    // 未读对话列表项（.geek-item[data-id]）
-    var items = Array.from(document.querySelectorAll('.geek-item[data-id]'));
+    // 未读对话列表项（.geek-item[data-id]）★ 随机顺序读取
+    var items = shuffleCards(Array.from(document.querySelectorAll('.geek-item[data-id]')));
     if (items.length === previousCount) {
       if (++sameCountTimes >= 3) { console.log('[求简历] 列表无新增，结束'); break; }
     } else { previousCount = items.length; sameCountTimes = 0; }
@@ -4700,6 +4797,10 @@ async function handleRecommendPageAnalysis(button) {
   let dialogTimeoutCheck;
 
   while (isAnalyzing) {
+    // ★ 22:02 后停止 / 页面不可见时暂停
+    if (await humanGuard()) break;
+    // ★ 检测 Boss 限流提示，出现则等待恢复
+    if (await detectAndWaitRateLimit()) continue;
 
     // 检测付费墙弹窗
     if (detectPaywallPopup(document) || detectPaywallPopup(iframeDoc)) {
@@ -4713,7 +4814,7 @@ async function handleRecommendPageAnalysis(button) {
     const recommendListRoot = iframeDoc.querySelector("#recommend-list");
     if (!recommendListRoot) {
       console.warn('未找到 #recommend-list，等待下一轮重试');
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await humanDelay(800, 1600);
       continue;
     }
 
@@ -4782,12 +4883,15 @@ async function handleRecommendPageAnalysis(button) {
     let basicInfo = null;
     let cardInner = null;
 
-    // 逐个处理简历卡片
-    for (const card of resumeCards) {
+    // ★ 随机顺序读取（不按列表顺序挨着读）
+    for (const card of shuffleCards(resumeCards)) {
       if (!isAnalyzing) {
         console.log('分析过程被中断');
         return;
       }
+
+      // ★ 22:02 后停止 / 页面不可见时暂停
+      if (await humanGuard()) return;
 
       // 检测付费墙弹窗
       if (detectPaywallPopup(document) || detectPaywallPopup(iframeDoc)) {
@@ -4862,14 +4966,14 @@ async function handleRecommendPageAnalysis(button) {
         await closeInterferingPopups(iframeDoc);
 
         // 额外等待确保之前的对话框完全关闭
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await humanDelay(400, 1000);
 
         // 点击卡片打开简历
         await window.resumeManager.clickElement(cardInner);
         console.log('已点击简历卡片');
 
         // 短暂等待后检测是否有付费墙弹窗
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await humanDelay(400, 1000);
         if (detectPaywallPopup(document) || detectPaywallPopup(iframeDoc)) {
           console.log('检测到付费墙弹窗，停止分析');
           showError('遇到付费墙（权益不足），请检查您的BOSS直聘账号权限');
@@ -5013,7 +5117,8 @@ async function handleRecommendPageAnalysis(button) {
         }
 
         // 等待2秒后关闭简历弹窗
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await humanDelay(1800, 4200);
+        await maybeTakeHumanBreak();
         if (!isAnalyzing) return;
 
         // ★ 强力关闭并验证：必须真的关掉当前 frame 弹窗，才能打开下一个
@@ -5043,7 +5148,7 @@ async function handleRecommendPageAnalysis(button) {
       await autoScroll(iframeDoc);
 
       // 等待新内容加载
-      await new Promise(resolve => setTimeout(resolve, 3000)); // 延长等待时间
+      await humanDelay(2500, 5000); // 延长等待时间
 
       // 检查是否有新的简历加载
       let newCards;
@@ -5073,7 +5178,7 @@ async function handleRecommendPageAnalysis(button) {
         console.log('没有新的简历加载，可能已到达底部');
         // 再尝试滚动一次，确认是否真的到底了
         await autoScroll(iframeDoc);
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await humanDelay(2500, 5000);
 
         // 再次使用相同的逻辑检查新卡片
         let finalCheck;
