@@ -531,6 +531,19 @@ const templates = {
       const button = document.querySelector('[data-id="' + id + '"]');
       button.textContent = content.classList.contains('show') ? '隐藏思考过程' : '查看思考过程';
     }
+    // 分享卡片点击放大（事件委托，避免内联事件被 CSP 阻止）
+    document.addEventListener('click', function(e) {
+      var t = e.target;
+      if (!t || !t.matches || !t.matches('img[data-zoom]')) return;
+      var o = document.createElement('div');
+      o.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:99999;display:flex;align-items:center;justify-content:center;cursor:zoom-out;';
+      var big = document.createElement('img');
+      big.src = t.src;
+      big.style.cssText = 'max-width:90%;max-height:90%;border-radius:8px;';
+      o.appendChild(big);
+      o.addEventListener('click', function() { o.remove(); });
+      document.body.appendChild(o);
+    });
   </script>
 </head>
 <body class="export-body">
@@ -587,7 +600,7 @@ const templates = {
           </div>
           <div class="result-suggestion">${result.evaluation?.suggestion || ''}</div>
 
-          ${result.shareCardImage ? `<div style="margin-top:10px;text-align:center;"><div style="font-size:12px;color:#666;margin-bottom:4px;">分享卡片：</div><img src="${result.shareCardImage}" style="max-width:280px;border:1px solid #eee;border-radius:4px;cursor:zoom-in;" onclick="var o=document.createElement('div');o.style='position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:99999;display:flex;align-items:center;justify-content:center;cursor:zoom-out;';o.innerHTML='<img src=this.src style=max-width:90%;max-height:90%;border-radius:8px;';o.onclick=function(){o.remove()};document.body.appendChild(o)" /></div>` : ''}
+          ${result.shareCardImage ? `<div style="margin-top:10px;text-align:center;"><div style="font-size:12px;color:#666;margin-bottom:4px;">分享卡片：</div><img src="${result.shareCardImage}" data-zoom="1" style="max-width:280px;border:1px solid #eee;border-radius:4px;cursor:zoom-in;" /></div>` : ''}
 
           ${result.shareLink ? `
             <div class="share-link">

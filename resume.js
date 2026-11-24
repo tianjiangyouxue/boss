@@ -642,12 +642,11 @@ async function captureCardOnly(doc) {
       }catch(e){console.warn('[卡片] 兜底截图失败',e.message)}
     }
 
-    // 5. 关弹窗（从当前激活的 shareBox 里找）
-    var cx2=(shareBox||document).querySelector('.boss-popup__close i,[class*="close"] i');
-    if(cx2){cx2.click();await new Promise(function(r){setTimeout(r,300)})}
+    // 5. 关闭转发弹窗（全局查询 + 强制移除，避免残留遮挡；异常路径也要关）
+    try { await closeAllShareBoxes(); } catch(e) {}
     incDailyShare();
     return {shareLink:null,shareCardImage:cardImage};
-  } catch(e) { console.warn('[卡片]',e.message); return {shareLink:null,shareCardImage:null}; }
+  } catch(e) { console.warn('[卡片]',e.message); try { await closeAllShareBoxes(); } catch(e2) {} return {shareLink:null,shareCardImage:null}; }
 }
 
 async function generateShareLink(doc = document) {
@@ -819,15 +818,14 @@ async function generateShareLink(doc = document) {
 
     console.log('邮件转发已提交, cardImage:', cardImage ? (cardImage.length/1024).toFixed(0)+'KB' : 'NULL');
     incDailyShare();
-    // ★ 关闭分享弹窗，防止堆叠
-    try {
-      const closeBtn = (activeShareBox||document).querySelector('.boss-popup__close i, .iboss-close, [class*="close"] i, [class*="close"]');
-      if (closeBtn) { closeBtn.click(); await new Promise(r => setTimeout(r, 300)); }
-    } catch(e) {}
+    // ★ 关闭分享弹窗，防止堆叠（全局查询，不依赖可能已失效的 activeShareBox）
+    try { await closeAllShareBoxes(); } catch(e) {}
     return { shareLink: null, shareCardImage: cardImage };
 
   } catch (error) {
     console.error('生成分享链接失败:', error);
+    // ★ 异常路径也必须关闭转发弹窗，否则会一直遮挡页面
+    try { await closeAllShareBoxes(); } catch(e2) {}
     console.error('错误堆栈:', error.stack);
     // 打印当前DOM状态
     console.log('当前页面分享相关元素:', {
@@ -3097,7 +3095,7 @@ function getCaptureUnqualifiedCardSetting() {
   return new Promise((resolve) => {
     chrome.storage.sync.get(['captureUnqualifiedCard'], (result) => {
       // 默认 true（始终截取分享卡片），false=未达标不截取
-      resolve(result.captureUnqualifiedCard !== undefined ? result.captureUnqualifiedCard : true);
+      resolve(result.captureUnqualifiedCard !== undefined ? result.captureUnqualifiedCard : false);
     });
   });
 }
@@ -3273,16 +3271,159 @@ async function closeAllShareBoxes() {
     }
     if (closed > 0) await new Promise(function(r) { setTimeout(r, 400); });
     // ★ 点关闭后，强制把仍残留在 DOM 的 .c-share-box 整个移除（BOSS复用元素→旧图残留的根因）
+    //   移除前先尝试点祖先容器里的关闭按钮，让 BOSS 自己走关闭流程（避免状态不同步→遮罩重现）
     var removed = 0;
+    var _isVis = function(el) {
+      try {
+        var r = el.getBoundingClientRect();
+        if (r.width < 3 || r.height < 3) return false;
+        var st = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+        return st.display !== 'none' && st.visibility !== 'hidden';
+      } catch(e) { return false; }
+    };
     for (var d2 = 0; d2 < docs.length; d2++) {
       var dd2 = docs[d2];
       if (!dd2 || !dd2.querySelectorAll) continue;
       var boxes = dd2.querySelectorAll('.c-share-box');
       for (var j = 0; j < boxes.length; j++) {
-        try { boxes[j].parentNode && boxes[j].parentNode.removeChild(boxes[j]); removed++; } catch(e) {}
+        try {
+          var _p = boxes[j].parentElement;
+          for (var _up = 0; _up < 4 && _p; _up++) {
+            var _cb = _p.querySelector('.boss-popup__close, .iboss-close, .dialog-close, .icon-close');
+            if (_cb && _isVis(_cb) && _cb.click) { _cb.click(); await new Promise(function(r){setTimeout(r,250)}); break; }
+            _p = _p.parentElement;
+          }
+          if (boxes[j].parentNode) { boxes[j].parentNode.removeChild(boxes[j]); removed++; }
+        } catch(e) {}
       }
     }
     if (closed > 0 || removed > 0) console.log('清理旧分享弹窗: 关闭' + closed + ' 移除' + removed);
+
+    // ★ 清理分享弹窗遗留的遮罩层/空壳容器
+    //    注意：fixed 全屏元素的 offsetParent 为 null，必须用 getBoundingClientRect + computedStyle 判断
+    //    ★ 即使本次没有刚关闭的弹窗（closed/removed=0），只要检测到残留遮罩也要清理
+    var _hasResidualMask = false;
+    for (var _rd = 0; _rd < docs.length; _rd++) {
+      try {
+        if (docs[_rd].querySelector && docs[_rd].querySelector('.boss-layer__wrapper, .dialog-wrap.active')) { _hasResidualMask = true; break; }
+      } catch(e) {}
+    }
+    if (closed > 0 || removed > 0 || _hasResidualMask) {
+      var _vis = function(el) {
+        try {
+          var r = el.getBoundingClientRect();
+          if (r.width < 5 || r.height < 5) return false;
+          var st = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+          return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+        } catch(e) { return false; }
+      };
+      var _hasPageContent = function(el) {
+        return !!el.querySelector('.resume-detail-wrap, .resume-layout-wrap, iframe[src*="c-resume"], .geek-info-card, .card-item, .card-inner');
+      };
+      // 1) 空壳 wrapper（弹窗本体已移除、只剩背景层）
+      //    包含 BOSS 的 .boss-layer__wrapper（纯遮罩层：fixed 全屏 rgba(37,40,48,.7)）
+      for (var d4 = 0; d4 < docs.length; d4++) {
+        var dd4 = docs[d4];
+        if (!dd4 || !dd4.querySelectorAll) continue;
+        var wraps = dd4.querySelectorAll('.boss-popup__wrapper, .boss-dialog__wrapper, .boss-layer__wrapper');
+        for (var w = 0; w < wraps.length; w++) {
+          try {
+            var wl = wraps[w];
+            if (!_vis(wl)) continue;
+            if (wl.querySelector('.c-share-box')) continue;
+            if (_hasPageContent(wl)) continue;
+            if ((wl.innerText || '').trim().length === 0) { wl.parentNode && wl.parentNode.removeChild(wl); console.log('清理空壳弹窗容器:', wl.className); }
+          } catch(e) {}
+        }
+      }
+      // 1b) BOSS 动态弹窗容器若已空壳 → 取消 active（否则下次渲染会重新挂遮罩）
+      for (var d6 = 0; d6 < docs.length; d6++) {
+        var dd6 = docs[d6];
+        if (!dd6 || !dd6.querySelectorAll) continue;
+        var dws = dd6.querySelectorAll('.dialog-wrap.active');
+        for (var di = 0; di < dws.length; di++) {
+          try {
+            var dw = dws[di];
+            if (dw.querySelector('.boss-layer__wrapper, .boss-popup__wrapper, .boss-dialog__wrapper, .c-share-box, iframe')) continue;
+            if ((dw.innerText || '').trim().length > 0) continue;
+            dw.classList.remove('active');
+            console.log('清理空壳 dialog-wrap');
+          } catch(e) {}
+        }
+      }
+      // 1c) 没有可见弹窗层时，解除 BOSS 的页面滚动锁定
+      try {
+        var _anyVisibleDialog = false;
+        var _dlgs = document.querySelectorAll('.boss-layer__wrapper, .boss-popup__wrapper, .dialog-wrap.active');
+        for (var _vi = 0; _vi < _dlgs.length; _vi++) {
+          var _dr = _dlgs[_vi].getBoundingClientRect();
+          if (_dr.width > 50 && _dr.height > 50) { _anyVisibleDialog = true; break; }
+        }
+        if (!_anyVisibleDialog) {
+          document.body.classList.remove('boss-layer__lock-scroll');
+          document.documentElement.classList.remove('boss-layer__lock-scroll');
+        }
+      } catch(e) {}
+      // 2) 通用遮罩识别：全屏 + fixed/absolute + 半透明背景 + 无文本 + 无交互控件
+      var _looksLikeMask = function(el) {
+        try {
+          if (!_vis(el)) return false;
+          var r = el.getBoundingClientRect();
+          if (r.width < window.innerWidth * 0.7 || r.height < window.innerHeight * 0.7) return false;
+          var st = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+          if (st.position !== 'fixed' && st.position !== 'absolute') return false;
+          var bg = st.backgroundColor || '';
+          var m = bg.match(/^rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\)$/);
+          var op = parseFloat(st.opacity || '1');
+          // 半透明：rgba alpha<1，或元素整体 opacity<1 且有背景色
+          var semi = (m && parseFloat(m[1]) > 0 && parseFloat(m[1]) < 1) ||
+                     (op > 0 && op < 1 && bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent');
+          if (!semi) return false;
+          if ((el.innerText || '').trim().length > 0) return false;
+          if (el.querySelector('button, a, input, textarea, [role="button"]')) return false;
+          return true;
+        } catch(e) { return false; }
+      };
+      var _maskRemoved = 0;
+      for (var d5 = 0; d5 < docs.length; d5++) {
+        var dd5 = docs[d5];
+        if (!dd5 || !dd5.body) continue;
+        var cands = Array.from(dd5.body.children).concat(Array.from(dd5.querySelectorAll('[class*="mask"], [class*="overlay"]')));
+        for (var mi = 0; mi < cands.length; mi++) {
+          try {
+            var mk = cands[mi];
+            if (!mk || !mk.parentNode) continue;
+            if (!_looksLikeMask(mk)) continue;
+            mk.parentNode.removeChild(mk);
+            _maskRemoved++;
+          } catch(e) {}
+        }
+      }
+      if (_maskRemoved > 0) console.log('清理残留遮罩层:', _maskRemoved);
+    }
+
+    // ★ 兜底：类名变化时按文本识别"转发"弹窗并关闭
+    var closed2 = 0;
+    for (var d3 = 0; d3 < docs.length; d3++) {
+      var dd3 = docs[d3];
+      if (!dd3 || !dd3.querySelectorAll) continue;
+      var boxes2 = dd3.querySelectorAll('.boss-popup__wrapper, .boss-dialog__wrapper, [class*="popup"], [class*="dialog"]');
+      for (var k = 0; k < boxes2.length; k++) {
+        try {
+          var b = boxes2[k];
+          if (b.offsetParent === null) continue;
+          if (b.querySelector('.c-share-box')) continue; // 已由上面的强制移除处理
+          var txt = (b.innerText || '').slice(0, 500);
+          if (!/转发至其他|邮件转发|站内同事/.test(txt)) continue;
+          var cb = b.querySelector('.boss-popup__close, .iboss-close, .dialog-close, .icon-close, .close');
+          if (cb && cb.click) { cb.click(); closed2++; }
+        } catch(e) {}
+      }
+    }
+    if (closed2 > 0) {
+      await new Promise(function(r) { setTimeout(r, 300); });
+      console.log('兜底关闭转发弹窗:', closed2);
+    }
   } catch(e) {}
 }
 
@@ -3422,6 +3563,7 @@ async function handleSearchPageAnalysis(button) {
         await closeAllResumeDialogs(document);
         await closeInterferingPopups(document);
         await closeInterferingPopups(document);
+        await closeAllShareBoxes(); // ★ 清掉残留的转发/分享弹窗
 
         const clickableLink = card.querySelector('a[ka="search_click_open_resume"]');
         if (clickableLink) {
@@ -4077,23 +4219,6 @@ async function handleChatPageAnalysis(button) {
   }
 
   console.log(`聊天页面简历分析完成，本次共处理 ${processedIds.size} 份简历`);
-}
-
-async function closeAllShareBoxes() {
-  try {
-    var _docs = [document];
-    (function _coll(root, depth) {
-      if (!root || !root.querySelectorAll || depth > 4) return;
-      try { var _ifs = root.querySelectorAll("iframe"); for (var _i = 0; _i < _ifs.length; _i++) { try { var _fd = _ifs[_i].contentDocument; if (_fd && _docs.indexOf(_fd)===-1) { _docs.push(_fd); _coll(_fd,depth+1); } } catch(e) {} } } catch(e) {}
-    })(document, 0);
-    for (var _d = 0; _d < _docs.length; _d++) {
-      var _dd = _docs[_d]; if (!_dd || !_dd.querySelectorAll) continue;
-      var _btns = _dd.querySelectorAll(".c-share-box .iboss-close, .c-share-box .boss-popup__close, .c-share-box .close, .c-share-box .icon-close");
-      for (var _i2 = 0; _i2 < _btns.length; _i2++) { if (_btns[_i2].offsetParent!==null) _btns[_i2].click(); }
-      var _bxs = _dd.querySelectorAll(".c-share-box");
-      for (var _j = 0; _j < _bxs.length; _j++) { try { _bxs[_j].parentNode && _bxs[_j].parentNode.removeChild(_bxs[_j]); } catch(e) {} }
-    }
-  } catch(e) {}
 }
 
 // ==================== 通信页自动求简历/下载附件 ====================
@@ -4964,6 +5089,7 @@ async function handleRecommendPageAnalysis(button) {
         await window.resumeManager.forceCloseResumeDialog([document, iframeDoc], 5);
         await closeInterferingPopups(document);
         await closeInterferingPopups(iframeDoc);
+        await closeAllShareBoxes(); // ★ 清掉残留的转发/分享弹窗
 
         // 额外等待确保之前的对话框完全关闭
         await humanDelay(400, 1000);
