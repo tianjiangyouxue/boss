@@ -3119,10 +3119,18 @@ function getCaptureUnqualifiedCardSetting() {
 // 获取用户设置的Prompt
 function getUserPrompt() {
   return new Promise((resolve) => {
-    chrome.storage.local.get(['promptTemplates', 'selectedPromptIndex'], (result) => {
+    chrome.storage.local.get(['customApiConfig', 'promptTemplates', 'selectedPromptIndex'], (result) => {
       console.log('获取到的 promptTemplates:', result.promptTemplates);
       console.log('获取到的 selectedPromptIndex:', result.selectedPromptIndex);
 
+      // ★ 优先使用设置面板保存的系统提示词（此前该配置未被评估流程读取，导致 AI 忽略用户配置）
+      const customPrompt = result.customApiConfig && result.customApiConfig.systemPrompt;
+      if (customPrompt && customPrompt.trim()) {
+        console.log('使用设置面板中的系统提示词，长度:', customPrompt.trim().length);
+        return resolve({ name: '自定义提示词', content: customPrompt.trim() });
+      }
+
+      // 回退：模板列表
       const templates = result.promptTemplates || [{
         name: '默认模板',
         content: `请根据以下标准评估这份简历（默认0分）：
